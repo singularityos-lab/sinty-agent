@@ -98,14 +98,26 @@ def edit():
     time.sleep(1)
     check("saved on disk", "scritto dal vivo" in open(p).read(), open(p).read())
 
+def browser():
+    e, t = invoke("browser_open", url="data:text/html,<title>Prova</title><p>ciao agente</p>")
+    check("open", not e, t)
+    tid = json.loads(t)["id"]
+    time.sleep(6)
+    e, t = invoke("browser_tabs")
+    check("tabs", not e and tid in t, t)
+    e, t = invoke("browser_read", id=tid)
+    check("read", not e and "ciao agente" in t, t)
+    check("focus", not invoke("browser_focus", id=tid)[0])
+    check("close", not invoke("browser_close", id=tid)[0])
+
 def tool_mode(m):
     subprocess.run([BIN + "/sinty-agent", "mode", m], capture_output=True, timeout=10)
 
-{"dev.sinty.notes": notes, "dev.sinty.tasks": tasks, "dev.sinty.camera": camera, "dev.sinty.files": files, "dev.sinty.edit": edit}[APP]()
+{"dev.sinty.notes": notes, "dev.sinty.tasks": tasks, "dev.sinty.camera": camera, "dev.sinty.files": files, "dev.sinty.edit": edit, "dev.sinty.browser": browser}[APP]()
 check("context", not tool("app_context", app=APP)[0])
 check("unknown intent fails", invoke("nope")[0])
 tool_mode("plan")
-w = {"dev.sinty.notes": "note_create", "dev.sinty.tasks": "task_add", "dev.sinty.files": "files_mkdir", "dev.sinty.edit": "edit_insert"}.get(APP)
+w = {"dev.sinty.notes": "note_create", "dev.sinty.tasks": "task_add", "dev.sinty.files": "files_mkdir", "dev.sinty.edit": "edit_insert", "dev.sinty.browser": "browser_open"}.get(APP)
 check("plan refuses writes", w is None or invoke(w, title="x", text="x", path="/nonexistent/x")[0])
 try:
     bus = Gio.bus_get_sync(Gio.BusType.SESSION)
