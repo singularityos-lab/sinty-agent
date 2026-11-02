@@ -78,14 +78,14 @@ pub fn canonical(exe: []const u8) []const u8 {
     return exe;
 }
 
-fn isSameRootOwnedFile(a: std.mem.Allocator, pid: i32, exe: []const u8, compat: bool) bool {
+fn isSameRootOwnedFile(a: std.mem.Allocator, pid: i32, exe: []const u8) bool {
     const z = a.dupeZ(u8, exe) catch return false;
     const link = std.fmt.allocPrintSentinel(a, "/proc/{d}/exe", .{pid}, 0) catch return false;
     var want: c.struct_stat = undefined;
     var got: c.struct_stat = undefined;
     if (c.stat(z.ptr, &want) != 0) return false;
     const safe = want.st_uid == 0 and want.st_mode & 0o022 == 0;
-    if (c.stat(link.ptr, &got) != 0) return safe and compat;
+    if (c.stat(link.ptr, &got) != 0) return false;
     if (want.st_dev != got.st_dev or want.st_ino != got.st_ino) return false;
     return safe;
 }
@@ -101,7 +101,7 @@ pub fn trusted(a: std.mem.Allocator, pid: i32) bool {
         }
     }
     for (SHELLS) |s| {
-        if (std.mem.eql(u8, s, exe)) return isSameRootOwnedFile(a, pid, exe, raw.len != exe.len) and cleanEnv(a, pid);
+        if (std.mem.eql(u8, s, exe)) return isSameRootOwnedFile(a, pid, exe) and cleanEnv(a, pid);
     }
     return false;
 }
