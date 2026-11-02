@@ -95,6 +95,18 @@ fn emit(signal: [*:0]const u8, params: *c.GVariant) void {
     _ = c.g_dbus_connection_emit_signal(bus, null, PATH, IFACE, signal, params, null);
 }
 
+fn showArgs(a: std.mem.Allocator, args: std.json.Value) []const u8 {
+    if (args != .object) return "";
+    var out: std.ArrayList(u8) = .empty;
+    var it = args.object.iterator();
+    while (it.next()) |e| {
+        const v = e.value_ptr.*;
+        const shown = if (v == .string) v.string else std.json.Stringify.valueAlloc(a, v, .{}) catch "";
+        out.print(a, "\n{s}: {s}", .{ e.key_ptr.*, shown }) catch return "";
+    }
+    return out.items;
+}
+
 fn confirm(a: std.mem.Allocator, who: []const u8, tool: []const u8, args: std.json.Value) Answer {
     c.g_mutex_lock(&lock);
     defer c.g_mutex_unlock(&lock);
@@ -103,8 +115,7 @@ fn confirm(a: std.mem.Allocator, who: []const u8, tool: []const u8, args: std.js
     next_confirm += 1;
     waiting = id;
     answer = .none;
-    const shown = std.json.Stringify.valueAlloc(a, args, .{}) catch "";
-    const text = std.fmt.allocPrintSentinel(a, "{s}: {s} {s}", .{ who, tool, shown }, 0) catch "";
+    const text = std.fmt.allocPrintSentinel(a, "{s}: {s}{s}", .{ who, tool, showArgs(a, args) }, 0) catch "";
     emit("ConfirmRequested", c.g_variant_new("(us)", id, text.ptr).?);
     const end = c.g_get_monotonic_time() + CONFIRM_US;
     while (answer == .none and !stopped) {
@@ -785,4 +796,13 @@ pub fn main() void {
 
     _ = c.g_bus_own_name_on_connection(bus, NAME, c.G_BUS_NAME_OWNER_FLAGS_NONE, onBus, onLost, null, null);
     c.g_main_loop_run(c.g_main_loop_new(null, 0));
+}
+
+test "showArgs prints one readable line per argument" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"app\":\"dev.sinty.files\",\"n\":2}", .{});
+    try std.testing.expectEqualStrings("\napp: dev.sinty.files\nn: 2", showArgs(a, parsed));
+    try std.testing.expectEqualStrings("", showArgs(a, .null));
 }
