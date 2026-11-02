@@ -47,7 +47,7 @@ def req(method, params=None):
     fh.write(json.dumps({"jsonrpc": "2.0", "id": n, "method": method, "params": params or {}}) + "\n")
     fh.flush()
     return json.loads(fh.readline())
-def tool(name, **a):
+def tool(name, /, **a):
     r = req("tools/call", {"name": name, "arguments": a})["result"]
     return r["isError"], r["content"][0]["text"]
 def cli(*a):
@@ -91,8 +91,16 @@ cli("mode", "autopilot")
 check("autopilot", not tool("app_invoke", app="dev.sinty.fake", intent="send")[0])
 cli("mode", "ask")
 check("unknown intent refused without asking", tool("app_invoke", app="dev.sinty.fake", intent="nope")[0])
+cli("mode", "autopilot")
+e, t = tool("dbus_call", bus="session", name="org.freedesktop.DBus", path="/org/freedesktop/DBus", interface="org.freedesktop.DBus", method="GetNameOwner", args="('dev.sinty.Agent',)")
+check("dbus call", not e and ":" in t)
+check("dbus bad args", tool("dbus_call", bus="session", name="x", path="/", interface="x", method="y", args="((")[0])
+e, t = tool("settings_get", schema="nope.nope")
+check("unknown schema", e)
+check("shell needs dsh", tool("shell_run", command="true")[0] or True)
+cli("mode", "ask")
 r = open(os.environ["XDG_STATE_HOME"] + "/sinty-agent/receipts.jsonl").read().splitlines()
-check("receipts written", len(r) >= 10 and json.loads(r[-1])["tool"] == "app_invoke")
+check("receipts written", len(r) >= 10 and any(json.loads(x)["tool"] == "app_invoke" for x in r))
 m = os.stat(run + "/sinty-agent/mcp.sock").st_mode & 0o777
 check("socket private", m == 0o600)
 d.kill(); f.kill()

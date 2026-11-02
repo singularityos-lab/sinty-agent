@@ -7,6 +7,7 @@ const policy = @import("policy.zig");
 const catalog = @import("catalog.zig");
 const mcp = @import("mcp.zig");
 
+const EMPTY: [:0]const u8 = "";
 const BRIDGE = "/usr/libexec/sinty-agent-bridge";
 const NAME = "dev.sinty.Agent";
 const PATH = "/dev/sinty/Agent";
@@ -246,6 +247,118 @@ fn status(a: std.mem.Allocator) []const u8 {
     return std.json.Stringify.valueAlloc(a, .{ .mode = @tagName(mode), .stopped = stopped, .waiting = waiting }, .{}) catch "{}";
 }
 
+fn gerror(a: std.mem.Allocator, err: *[*c]c.GError) mcp.Outcome {
+    defer c.g_clear_error(err);
+    return fail(a.dupe(u8, std.mem.span(err.*.*.message)) catch "failed");
+}
+
+fn launchUri(uri: [*:0]const u8) mcp.Outcome {
+    var err: [*c]c.GError = null;
+    if (c.g_app_info_launch_default_for_uri(uri, null, &err) == 0) return gerror(std.heap.c_allocator, &err);
+    return .{ .text = "opened" };
+}
+
+fn mailCompose(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const to = c.g_uri_escape_string((str(args, "to") orelse EMPTY).ptr, "@,", 0);
+    const subject = c.g_uri_escape_string((str(args, "subject") orelse EMPTY).ptr, null, 0);
+    const body = c.g_uri_escape_string((str(args, "body") orelse EMPTY).ptr, null, 0);
+    const uri = std.fmt.allocPrintSentinel(a, "mailto:{s}?subject={s}&body={s}", .{ std.mem.span(to), std.mem.span(subject), std.mem.span(body) }, 0) catch return fail("out of memory");
+    return launchUri(uri.ptr);
+}
+
+fn openUri(args: std.json.Value) mcp.Outcome {
+    const uri = str(args, "uri") orelse return fail("missing uri");
+    return launchUri(uri.ptr);
+}
+
+fn notify(args: std.json.Value) mcp.Outcome {
+    const title = str(args, "title") orelse return fail("missing title");
+    const body = str(args, "body") orelse EMPTY;
+    const actions = c.g_variant_builder_new(vt("as"));
+    defer c.g_variant_builder_unref(actions);
+    const hints = c.g_variant_builder_new(vt("a{sv}"));
+    defer c.g_variant_builder_unref(hints);
+    var err: [*c]c.GError = null;
+    const r = c.g_dbus_connection_call_sync(bus, "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "Notify", c.g_variant_new("(susssasa{sv}i)", "Sinty Agent", @as(c.guint32, 0), "", title.ptr, body.ptr, actions, hints, @as(c.gint32, -1)), null, c.G_DBUS_CALL_FLAGS_NONE, 5000, null, &err);
+    if (r == null) return gerror(std.heap.c_allocator, &err);
+    c.g_variant_unref(r);
+    return .{ .text = "shown" };
+}
+
+fn findSchema(name: [:0]const u8) ?*c.GSettingsSchema {
+    const source = c.g_settings_schema_source_get_default() orelse return null;
+    return c.g_settings_schema_source_lookup(source, name.ptr, 1);
+}
+
+fn settingsGet(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const name = str(args, "schema") orelse return fail("missing schema");
+    const schema = findSchema(name) orelse return fail("no such schema");
+    defer c.g_settings_schema_unref(schema);
+    if (str(args, "key")) |key| {
+        if (c.g_settings_schema_has_key(schema, key.ptr) == 0) return fail("no such key");
+        const s = c.g_settings_new(name.ptr);
+        defer c.g_object_unref(s);
+        const v = c.g_settings_get_value(s, key.ptr);
+        defer c.g_variant_unref(v);
+        return .{ .text = a.dupe(u8, std.mem.span(c.g_variant_print(v, 0))) catch "" };
+    }
+    const keys = c.g_settings_schema_list_keys(schema);
+    const joined = c.g_strjoinv(",", keys);
+    return .{ .text = a.dupe(u8, std.mem.span(joined)) catch "" };
+}
+
+fn settingsSet(args: std.json.Value) mcp.Outcome {
+    const name = str(args, "schema") orelse return fail("missing schema");
+    const key = str(args, "key") orelse return fail("missing key");
+    const raw = str(args, "value") orelse return fail("missing value");
+    const schema = findSchema(name) orelse return fail("no such schema");
+    defer c.g_settings_schema_unref(schema);
+    if (c.g_settings_schema_has_key(schema, key.ptr) == 0) return fail("no such key");
+    const k = c.g_settings_schema_get_key(schema, key.ptr);
+    defer c.g_settings_schema_key_unref(k);
+    var err: [*c]c.GError = null;
+    const v = c.g_variant_parse(c.g_settings_schema_key_get_value_type(k), raw.ptr, null, null, &err);
+    if (v == null) return gerror(std.heap.c_allocator, &err);
+    const s = c.g_settings_new(name.ptr);
+    defer c.g_object_unref(s);
+    if (c.g_settings_set_value(s, key.ptr, v) == 0) return fail("this key cannot be written");
+    c.g_settings_sync();
+    return .{ .text = "changed" };
+}
+
+fn dbusCall(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const which = str(args, "bus") orelse return fail("missing bus");
+    const name = str(args, "name") orelse return fail("missing name");
+    const path = str(args, "path") orelse return fail("missing path");
+    const iface = str(args, "interface") orelse return fail("missing interface");
+    const method = str(args, "method") orelse return fail("missing method");
+    var err: [*c]c.GError = null;
+    var params: ?*c.GVariant = null;
+    if (str(args, "args")) |raw| {
+        params = c.g_variant_parse(null, raw.ptr, null, null, &err);
+        if (params == null) return gerror(a, &err);
+    }
+    const target = if (std.mem.eql(u8, which, "system")) c.g_bus_get_sync(c.G_BUS_TYPE_SYSTEM, null, &err) else bus;
+    if (target == null) return gerror(a, &err);
+    const r = c.g_dbus_connection_call_sync(target, name.ptr, path.ptr, iface.ptr, method.ptr, params, null, c.G_DBUS_CALL_FLAGS_NONE, 30000, null, &err);
+    if (r == null) return gerror(a, &err);
+    defer c.g_variant_unref(r);
+    return .{ .text = a.dupe(u8, std.mem.span(c.g_variant_print(r, 1))) catch "" };
+}
+
+fn shellRun(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const command = str(args, "command") orelse return fail("missing command");
+    if (c.g_find_program_in_path("dsh") == null) return fail("dsh is not available on this system");
+    const argv = [_:null]?[*:0]const u8{ "dsh", "-c", command.ptr };
+    var out: [*c]u8 = null;
+    var errs: [*c]u8 = null;
+    var st: c_int = 1;
+    var err: [*c]c.GError = null;
+    if (c.g_spawn_sync(null, @ptrCast(@constCast(&argv)), null, c.G_SPAWN_SEARCH_PATH, null, null, &out, &errs, &st, &err) == 0) return gerror(a, &err);
+    const text = std.fmt.allocPrint(a, "{s}{s}", .{ std.mem.span(out), std.mem.span(errs) }) catch return fail("out of memory");
+    return .{ .text = text, .failed = c.g_spawn_check_wait_status(st, null) == 0 };
+}
+
 fn riskOf(a: std.mem.Allocator, tool: *const catalog.Tool, args: std.json.Value) ?policy.Risk {
     if (!std.mem.eql(u8, tool.name, "app_invoke")) return tool.risk;
     const app = str(args, "app") orelse return .irreversible;
@@ -260,6 +373,13 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "app_invoke")) return appInvoke(a, args);
     if (std.mem.eql(u8, name, "app_action")) return appAction(a, args);
     if (std.mem.eql(u8, name, "agent_status")) return .{ .text = status(a) };
+    if (std.mem.eql(u8, name, "mail_compose")) return mailCompose(a, args);
+    if (std.mem.eql(u8, name, "open_uri")) return openUri(args);
+    if (std.mem.eql(u8, name, "notify")) return notify(args);
+    if (std.mem.eql(u8, name, "settings_get")) return settingsGet(a, args);
+    if (std.mem.eql(u8, name, "settings_set")) return settingsSet(args);
+    if (std.mem.eql(u8, name, "dbus_call")) return dbusCall(a, args);
+    if (std.mem.eql(u8, name, "shell_run")) return shellRun(a, args);
     if (std.mem.eql(u8, name, "app_context")) {
         const app = str(args, "app") orelse return fail("missing app");
         return appCall(a, app, APP_IFACE, "Context", null, "(s)");
@@ -293,7 +413,7 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
         },
         .run => o = run(a, name, args),
     }
-    if (!o.failed and (std.mem.eql(u8, name, "app_context") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
+    if (!o.failed and (std.mem.eql(u8, name, "app_context") or std.mem.eql(u8, name, "shell_run") or std.mem.eql(u8, name, "dbus_call") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
     receipt(a, name, args, label, o);
     const tz = a.dupeZ(u8, name) catch return o;
     const lz = a.dupeZ(u8, label) catch return o;

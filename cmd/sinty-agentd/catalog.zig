@@ -49,6 +49,48 @@ pub const TOOLS = [_]Tool{
         .risk = .irreversible,
     },
     .{
+        .name = "mail_compose",
+        .description = "Open a new message in the default mail application, with the fields filled. The user sends it.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}}}",
+        .risk = .undoable,
+    },
+    .{
+        .name = "open_uri",
+        .description = "Open a web address or a file with its default application.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"uri\":{\"type\":\"string\"}},\"required\":[\"uri\"]}",
+        .risk = .undoable,
+    },
+    .{
+        .name = "notify",
+        .description = "Show a desktop notification.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}},\"required\":[\"title\"]}",
+        .risk = .undoable,
+    },
+    .{
+        .name = "settings_get",
+        .description = "Read a setting by GSettings schema and key, or list the keys of a schema when key is omitted.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"schema\":{\"type\":\"string\"},\"key\":{\"type\":\"string\"}},\"required\":[\"schema\"]}",
+        .risk = .read,
+    },
+    .{
+        .name = "settings_set",
+        .description = "Change a setting. value is written in GVariant text format, such as true, 3 or 'dark'.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"schema\":{\"type\":\"string\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"schema\",\"key\",\"value\"]}",
+        .risk = .undoable,
+    },
+    .{
+        .name = "dbus_call",
+        .description = "Call any D-Bus method on the session or system bus, for what has no dedicated tool. args is GVariant text of a tuple, such as ('x', 3). Reaches only what the user may reach.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"bus\":{\"type\":\"string\",\"enum\":[\"session\",\"system\"]},\"name\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"interface\":{\"type\":\"string\"},\"method\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"bus\",\"name\",\"path\",\"interface\",\"method\"]}",
+        .risk = .irreversible,
+    },
+    .{
+        .name = "shell_run",
+        .description = "Run a shell command in dsh, the developer shell, and return its output. Use it for development work.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}",
+        .risk = .irreversible,
+    },
+    .{
         .name = "agent_status",
         .description = "Show the current mode and whether the agent is stopped.",
         .schema = NONE,

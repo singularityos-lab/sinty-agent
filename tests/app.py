@@ -24,7 +24,7 @@ def req(method, params=None):
     fh.write(json.dumps({"jsonrpc": "2.0", "id": n, "method": method, "params": params or {}}) + "\n")
     fh.flush()
     return json.loads(fh.readline())
-def tool(name, **k):
+def tool(name, /, **k):
     r = req("tools/call", {"name": name, "arguments": k})["result"]
     return r["isError"], r["content"][0]["text"]
 fails = []
