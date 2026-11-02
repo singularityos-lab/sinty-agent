@@ -514,7 +514,7 @@ fn settle() void {
     c.g_usleep(WAIT_STEP_US * 3);
 }
 
-const CONSENT = [_][]const u8{ "dev.sinty.portal.consent", "dev.sinty.screencast.chooser", "dev.sinty.polkit", "zenity" };
+const CONSENT = [_][]const u8{ "dev.sinty.portal.consent", "dev.sinty.screencast.chooser", "dev.sinty.PolkitAuthHelper", "dev.sinty.keyring", "zenity" };
 const CONSENT_OPEN = "a consent window is open: only the user can answer it";
 
 fn consentOpen() bool {
