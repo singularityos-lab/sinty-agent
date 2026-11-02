@@ -110,14 +110,35 @@ def browser():
     check("focus", not invoke("browser_focus", id=tid)[0])
     check("close", not invoke("browser_close", id=tid)[0])
 
+def write():
+    e, t = invoke("write_new")
+    check("new", not e, t + open(home + "/app.log").read()[-700:])
+    time.sleep(1)
+    check("type", not invoke("write_type", text="Prima riga\nSeconda riga")[0])
+    e, t = invoke("write_read")
+    check("read", not e and "Prima riga" in t and "Seconda riga" in t, t)
+    tool_mode("autopilot")
+    p = home + "/doc.odt"
+    e, t = invoke("write_save", path=p)
+    check("save", not e and os.path.getsize(p) > 0, t)
+
+def calendar():
+    e, t = invoke("calendar_add", title="Dentista", start="2026-11-05T10:00:00", end="2026-11-05T11:00:00")
+    check("add", not e and "Dentista" in t, t)
+    time.sleep(1)
+    e, t = invoke("calendar_list", **{"from": "2026-11-01T00:00:00", "to": "2026-11-30T00:00:00"})
+    check("list", not e and "Dentista" in t, t)
+    check("bad date refused", invoke("calendar_list", **{"from": "x", "to": "y"})[0])
+    check("show day", not invoke("calendar_show_day", date="2026-11-05T00:00:00")[0])
+
 def tool_mode(m):
     subprocess.run([BIN + "/sinty-agent", "mode", m], capture_output=True, timeout=10)
 
-{"dev.sinty.notes": notes, "dev.sinty.tasks": tasks, "dev.sinty.camera": camera, "dev.sinty.files": files, "dev.sinty.edit": edit, "dev.sinty.browser": browser}[APP]()
+{"dev.sinty.notes": notes, "dev.sinty.tasks": tasks, "dev.sinty.camera": camera, "dev.sinty.files": files, "dev.sinty.edit": edit, "dev.sinty.browser": browser, "dev.sinty.write": write, "dev.sinty.calendar": calendar}[APP]()
 check("context", not tool("app_context", app=APP)[0])
 check("unknown intent fails", invoke("nope")[0])
 tool_mode("plan")
-w = {"dev.sinty.notes": "note_create", "dev.sinty.tasks": "task_add", "dev.sinty.files": "files_mkdir", "dev.sinty.edit": "edit_insert", "dev.sinty.browser": "browser_open"}.get(APP)
+w = {"dev.sinty.notes": "note_create", "dev.sinty.tasks": "task_add", "dev.sinty.files": "files_mkdir", "dev.sinty.edit": "edit_insert", "dev.sinty.browser": "browser_open", "dev.sinty.write": "write_type", "dev.sinty.calendar": "calendar_add"}.get(APP)
 check("plan refuses writes", w is None or invoke(w, title="x", text="x", path="/nonexistent/x")[0])
 try:
     bus = Gio.bus_get_sync(Gio.BusType.SESSION)
