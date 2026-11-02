@@ -215,7 +215,11 @@ fn onFramePreview(data: ?*const anyopaque, _: ?*anyopaque, op: u32, _: [*c]const
 }
 
 fn usableFormat(fmt: u32) bool {
-    return fmt == c.WL_SHM_FORMAT_XRGB8888 or fmt == c.WL_SHM_FORMAT_ARGB8888;
+    return fmt == c.WL_SHM_FORMAT_XRGB8888 or fmt == c.WL_SHM_FORMAT_ARGB8888 or redFirst(fmt);
+}
+
+fn redFirst(fmt: u32) bool {
+    return fmt == c.WL_SHM_FORMAT_XBGR8888 or fmt == c.WL_SHM_FORMAT_ABGR8888;
 }
 
 fn onFrameCopy(data: ?*const anyopaque, _: ?*anyopaque, op: u32, _: [*c]const c.wl_message, args: [*c]c.wl_argument) callconv(.c) c_int {
@@ -754,6 +758,7 @@ fn chunk(a: std.mem.Allocator, o: *std.ArrayList(u8), tag: []const u8, data: []c
 }
 
 fn toPng(a: std.mem.Allocator, map: [*]const u8, f: Frame, scale: *f64) ?[]u8 {
+    const swap = redFirst(f.format);
     const big = @max(f.w, f.h);
     const step: usize = if (big > IMAGE_MAX) (big + IMAGE_MAX - 1) / IMAGE_MAX else 1;
     scale.* = 1.0 / @as(f64, @floatFromInt(step));
@@ -772,9 +777,9 @@ fn toPng(a: std.mem.Allocator, map: [*]const u8, f: Frame, scale: *f64) ?[]u8 {
                 const row = map + (if (f.invert) f.h - 1 - sy else sy) * f.stride;
                 for (0..step) |dx| {
                     const px = row + (x * step + dx) * 4;
-                    sum[0] += px[2];
+                    sum[0] += if (swap) px[0] else px[2];
                     sum[1] += px[1];
-                    sum[2] += px[0];
+                    sum[2] += if (swap) px[2] else px[0];
                 }
             }
             const n: u32 = @intCast(step * step);
