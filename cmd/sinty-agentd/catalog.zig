@@ -103,6 +103,18 @@ pub const TOOLS = [_]Tool{
         .risk = .irreversible,
     },
     .{
+        .name = "ui_tree",
+        .description = "Read the accessibility tree of a window by its id from windows_list: role, name, text, screen position and actions of every element, each with a ref for ui_act. Prefer it to images when the window exposes one.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"window\":{\"type\":\"integer\"}},\"required\":[\"window\"]}",
+        .risk = .read,
+    },
+    .{
+        .name = "ui_act",
+        .description = "Act on one element from ui_tree: action is one of its actions (such as click), focus, or set_text with text.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"ref\":{\"type\":\"string\"},\"action\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"ref\",\"action\"]}",
+        .risk = .irreversible,
+    },
+    .{
         .name = "settings_schemas",
         .description = "List the settings schemas installed on the system. Optional query filters by text, such as dev.sinty.",
         .schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}",

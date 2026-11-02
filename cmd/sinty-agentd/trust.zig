@@ -10,6 +10,8 @@ const SHELLS = [_][]const u8{
     "/opt/local/bin/singularity-desktop",
 };
 
+const COMPAT_ROOT = "/compat/linux";
+
 const TAINTING = [_][]const u8{ "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GTK_MODULES", "GTK_PATH", "GIO_EXTRA_MODULES", "GI_TYPELIB_PATH", "G_DEBUG" };
 
 const Cred = extern struct { pid: i32, uid: u32, gid: u32 };
@@ -57,16 +59,24 @@ pub fn envIsClean(env: []const u8) bool {
     return true;
 }
 
-fn rootOwned(a: std.mem.Allocator, exe: []const u8) bool {
+pub fn canonical(exe: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, exe, COMPAT_ROOT ++ "/")) return exe[COMPAT_ROOT.len..];
+    return exe;
+}
+
+fn isSameRootOwnedFile(a: std.mem.Allocator, pid: i32, exe: []const u8) bool {
     const z = a.dupeZ(u8, exe) catch return false;
-    var st: c.struct_stat = undefined;
-    if (c.stat(z.ptr, &st) != 0) return false;
-    return st.st_uid == 0 and st.st_mode & 0o022 == 0;
+    const link = std.fmt.allocPrintSentinel(a, "/proc/{d}/exe", .{pid}, 0) catch return false;
+    var want: c.struct_stat = undefined;
+    var got: c.struct_stat = undefined;
+    if (c.stat(z.ptr, &want) != 0 or c.stat(link.ptr, &got) != 0) return false;
+    if (want.st_dev != got.st_dev or want.st_ino != got.st_ino) return false;
+    return want.st_uid == 0 and want.st_mode & 0o022 == 0;
 }
 
 pub fn trusted(a: std.mem.Allocator, pid: i32) bool {
     if (pid <= 0) return false;
-    const exe = exeOf(a, pid);
+    const exe = canonical(exeOf(a, pid));
     if (options.test_trust.len != 0) {
         var it = std.mem.splitScalar(u8, options.test_trust, ':');
         while (it.next()) |p| {
@@ -74,7 +84,7 @@ pub fn trusted(a: std.mem.Allocator, pid: i32) bool {
         }
     }
     for (SHELLS) |s| {
-        if (std.mem.eql(u8, s, exe)) return rootOwned(a, exe) and cleanEnv(a, pid);
+        if (std.mem.eql(u8, s, exe)) return isSameRootOwnedFile(a, pid, exe) and cleanEnv(a, pid);
     }
     return false;
 }
@@ -86,4 +96,10 @@ test "a preloaded library spoils the environment" {
 
 test "nobody is trusted without a live process" {
     try std.testing.expect(!trusted(std.testing.allocator, 0));
+}
+
+test "canonical removes only the compat root" {
+    try std.testing.expectEqualStrings("/usr/bin/x", canonical("/compat/linux/usr/bin/x"));
+    try std.testing.expectEqualStrings("/usr/bin/x", canonical("/usr/bin/x"));
+    try std.testing.expectEqualStrings("/compat/linuxevil/x", canonical("/compat/linuxevil/x"));
 }

@@ -8,6 +8,7 @@ const catalog = @import("catalog.zig");
 const mcp = @import("mcp.zig");
 const wl = @import("wl.zig");
 const trust = @import("trust.zig");
+const a11y = @import("a11y.zig");
 
 const EMPTY: [:0]const u8 = "";
 const BRIDGE = "/usr/libexec/sinty-agent-bridge";
@@ -484,6 +485,19 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "mail_compose")) return mailCompose(a, args);
     if (std.mem.eql(u8, name, "open_uri")) return openUri(args);
     if (std.mem.eql(u8, name, "notify")) return notify(args);
+    if (std.mem.eql(u8, name, "ui_tree")) {
+        const v = args.object.get("window") orelse return fail("missing window");
+        if (v != .integer) return fail("missing window");
+        const place = wl.placeOfWindow(v.integer) orelse return fail("no such window");
+        return a11y.tree(a, place.pid, place.x, place.y);
+    }
+    if (std.mem.eql(u8, name, "ui_act")) {
+        if (wl.consentBlocked()) return fail("a consent window is open: only the user can answer it");
+        const ref = str(args, "ref") orelse return fail("missing ref");
+        const action = str(args, "action") orelse return fail("missing action");
+        const t = str(args, "text");
+        return a11y.act(a, ref, action, if (t) |x| x else null);
+    }
     if (std.mem.eql(u8, name, "settings_schemas")) return settingsSchemas(a, args);
     if (std.mem.eql(u8, name, "app_settings")) return appSettings(a, args);
     if (std.mem.eql(u8, name, "settings_get")) return settingsGet(a, args);
@@ -534,7 +548,7 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
         },
         .run => o = run(a, name, args),
     }
-    if (!o.failed and (std.mem.eql(u8, name, "app_context") or std.mem.eql(u8, name, "screen_capture") or std.mem.eql(u8, name, "windows_list") or std.mem.eql(u8, name, "shell_run") or std.mem.eql(u8, name, "dbus_call") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
+    if (!o.failed and (std.mem.eql(u8, name, "app_context") or std.mem.eql(u8, name, "screen_capture") or std.mem.eql(u8, name, "windows_list") or std.mem.eql(u8, name, "ui_tree") or std.mem.eql(u8, name, "shell_run") or std.mem.eql(u8, name, "dbus_call") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
     receipt(a, name, args, label, o);
     const tz = a.dupeZ(u8, name) catch return o;
     const lz = a.dupeZ(u8, label) catch return o;

@@ -214,12 +214,17 @@ fn onFramePreview(data: ?*const anyopaque, _: ?*anyopaque, op: u32, _: [*c]const
     return 0;
 }
 
+fn usableFormat(fmt: u32) bool {
+    return fmt == c.WL_SHM_FORMAT_XRGB8888 or fmt == c.WL_SHM_FORMAT_ARGB8888;
+}
+
 fn onFrameCopy(data: ?*const anyopaque, _: ?*anyopaque, op: u32, _: [*c]const c.wl_message, args: [*c]c.wl_argument) callconv(.c) c_int {
     const f: *Frame = @ptrCast(@alignCast(@constCast(data.?)));
     switch (op) {
         0 => {
-            if (!f.have) {
-                f.format = args[0].u;
+            const fmt = args[0].u;
+            if (!f.have or (!usableFormat(f.format) and usableFormat(fmt))) {
+                f.format = fmt;
                 f.w = args[1].u;
                 f.h = args[2].u;
                 f.stride = args[3].u;
@@ -435,6 +440,23 @@ pub fn windowSet(args: std.json.Value) mcp.Outcome {
     } else return fail("unknown action");
     _ = c.wl_display_roundtrip(display);
     return .{ .text = "done" };
+}
+
+pub const WindowPlace = struct { pid: i64, x: i32, y: i32 };
+
+pub fn placeOfWindow(id: i64) ?WindowPlace {
+    if (!enter()) return null;
+    defer leave();
+    refresh();
+    const w = byId(id) orelse return null;
+    if (w.pid <= 0) return null;
+    return .{ .pid = w.pid, .x = w.x, .y = w.y };
+}
+
+pub fn consentBlocked() bool {
+    if (!enter()) return false;
+    defer leave();
+    return consentOpen();
 }
 
 pub fn windowClose(args: std.json.Value) mcp.Outcome {
@@ -822,7 +844,7 @@ pub fn capture(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     defer if (copyF != null) c.zwlr_screencopy_frame_v1_destroy(copyF);
     waitFrame(&f, .have);
     if (!f.have or f.failed) return fail("the capture failed");
-    if (f.format != c.WL_SHM_FORMAT_XRGB8888 and f.format != c.WL_SHM_FORMAT_ARGB8888) return fail("unsupported pixel format");
+    if (!usableFormat(f.format)) return fail("unsupported pixel format");
     var fd: c_int = -1;
     var map: [*]u8 = undefined;
     const buffer = allocFrame(&f, &fd, &map) orelse return fail("cannot allocate the capture");
