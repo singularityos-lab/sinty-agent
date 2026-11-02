@@ -19,6 +19,21 @@ pub fn build(b: *std.Build) void {
 
     exe(b, "sinty-agentd", "cmd/sinty-agentd/main.zig", target, optimize);
     exe(b, "sinty-agent", "cmd/sinty-agent/main.zig", target, optimize);
+
+    const sinty = b.createModule(.{ .root_source_file = b.path("cmd/sinty/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    sinty.addIncludePath(b.path("cmd/sinty"));
+    sinty.linkSystemLibrary("gio-2.0", .{});
+    sinty.linkSystemLibrary("libsoup-3.0", .{});
+    sinty.linkSystemLibrary("libsecret-1", .{});
+    b.installArtifact(b.addExecutable(.{ .name = "sinty", .root_module = sinty }));
+
+    const bridge = b.createModule(.{
+        .root_source_file = b.path("cmd/sinty-agent-bridge/main.zig"),
+        .target = b.resolveTargetQuery(.{ .cpu_arch = target.result.cpu.arch, .os_tag = .linux, .abi = .musl }),
+        .optimize = .ReleaseSmall,
+        .link_libc = true,
+    });
+    b.installArtifact(b.addExecutable(.{ .name = "sinty-agent-bridge", .root_module = bridge, .linkage = .static }));
     b.installFile("data/dev.sinty.Agent.service", "share/dbus-1/services/dev.sinty.Agent.service");
 
     const test_step = b.step("test", "run tests");

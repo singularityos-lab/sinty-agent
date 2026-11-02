@@ -7,6 +7,7 @@ const policy = @import("policy.zig");
 const catalog = @import("catalog.zig");
 const mcp = @import("mcp.zig");
 
+const BRIDGE = "/usr/libexec/sinty-agent-bridge";
 const NAME = "dev.sinty.Agent";
 const PATH = "/dev/sinty/Agent";
 const IFACE = "dev.sinty.Agent1";
@@ -20,6 +21,7 @@ const XML =
     \\  <interface name="dev.sinty.Agent1">
     \\    <method name="SetMode"><arg name="mode" type="s" direction="in"/></method>
     \\    <method name="GetStatus"><arg name="status" type="s" direction="out"/></method>
+    \\    <method name="OpenGuestBridge"><arg name="socket" type="s" direction="out"/><arg name="bridge" type="s" direction="out"/></method>
     \\    <method name="Stop"/>
     \\    <method name="Resume"/>
     \\    <method name="Answer"><arg name="id" type="u" direction="in"/><arg name="allow" type="b" direction="in"/></method>
@@ -39,6 +41,7 @@ var stopped = false;
 var next_confirm: u32 = 1;
 var waiting: u32 = 0;
 var answer: Answer = .none;
+var guest_open = false;
 var receipts_path: [:0]const u8 = "";
 
 const Session = struct {
@@ -359,12 +362,45 @@ fn listen(path: [:0]const u8) c_int {
     return fd;
 }
 
+fn openGuestBridge(inv: ?*c.GDBusMethodInvocation) void {
+    const a = std.heap.c_allocator;
+    const dir = std.fmt.allocPrintSentinel(a, "{s}/artifacts/.sinty-agent", .{std.mem.span(c.g_get_home_dir())}, 0) catch return;
+    const sock = std.fmt.allocPrintSentinel(a, "{s}/mcp.sock", .{dir}, 0) catch return;
+    const bridge = std.fmt.allocPrintSentinel(a, "{s}/bridge", .{dir}, 0) catch return;
+    if (c.g_mkdir_with_parents(dir.ptr, 0o700) != 0) {
+        c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.Failed", "no folder shared with dsh");
+        return;
+    }
+    const source = c.g_file_new_for_path(c.g_getenv("SINTY_AGENT_BRIDGE") orelse BRIDGE);
+    const target = c.g_file_new_for_path(bridge.ptr);
+    _ = c.g_file_copy(source, target, c.G_FILE_COPY_OVERWRITE, null, null, null, null);
+    c.g_object_unref(source);
+    c.g_object_unref(target);
+    _ = c.chmod(bridge.ptr, 0o700);
+    c.g_mutex_lock(&lock);
+    const fresh = !guest_open;
+    guest_open = true;
+    c.g_mutex_unlock(&lock);
+    if (fresh) {
+        const t = std.Thread.spawn(.{}, acceptLoop, .{listen(sock)}) catch {
+            c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.Failed", "cannot start the listener");
+            return;
+        };
+        t.detach();
+    }
+    c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(ss)", sock.ptr, bridge.ptr));
+}
+
 fn onMethod(_: ?*c.GDBusConnection, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8, method: [*c]const u8, params: ?*c.GVariant, inv: ?*c.GDBusMethodInvocation, _: c.gpointer) callconv(.c) void {
     const m = std.mem.span(method);
     if (std.mem.eql(u8, m, "GetStatus")) {
         const a = std.heap.c_allocator;
         const s = a.dupeZ(u8, status(a)) catch "{}";
         c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(s)", s.ptr));
+        return;
+    }
+    if (std.mem.eql(u8, m, "OpenGuestBridge")) {
+        openGuestBridge(inv);
         return;
     }
     c.g_mutex_lock(&lock);
