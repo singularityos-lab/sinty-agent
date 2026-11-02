@@ -14,6 +14,8 @@ const COMPAT_ROOT = "/compat/linux";
 
 const TAINTING = [_][]const u8{ "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GTK_MODULES", "GTK_PATH", "GIO_EXTRA_MODULES", "GI_TYPELIB_PATH", "G_DEBUG" };
 
+const PATH_LISTS = [_][]const u8{ "LD_LIBRARY_PATH", "GI_TYPELIB_PATH" };
+
 const Cred = extern struct { pid: i32, uid: u32, gid: u32 };
 
 pub fn peerPid(fd: c_int) i32 {
@@ -48,12 +50,24 @@ fn cleanEnv(a: std.mem.Allocator, pid: i32) bool {
     return envIsClean(buf[0..used]);
 }
 
+fn systemPaths(value: []const u8) bool {
+    var it = std.mem.splitScalar(u8, value, ':');
+    while (it.next()) |p| {
+        if (!std.mem.startsWith(u8, p, "/usr/") and !std.mem.startsWith(u8, p, "/opt/local/")) return false;
+        if (std.mem.indexOf(u8, p, "..") != null) return false;
+    }
+    return true;
+}
+
 pub fn envIsClean(env: []const u8) bool {
     var it = std.mem.splitScalar(u8, env, 0);
     while (it.next()) |kv| {
         const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
         for (TAINTING) |t| {
-            if (std.mem.eql(u8, kv[0..eq], t)) return false;
+            if (!std.mem.eql(u8, kv[0..eq], t)) continue;
+            for (PATH_LISTS) |l| {
+                if (std.mem.eql(u8, t, l) and systemPaths(kv[eq + 1 ..])) break;
+            } else return false;
         }
     }
     return true;
@@ -64,19 +78,22 @@ pub fn canonical(exe: []const u8) []const u8 {
     return exe;
 }
 
-fn isSameRootOwnedFile(a: std.mem.Allocator, pid: i32, exe: []const u8) bool {
+fn isSameRootOwnedFile(a: std.mem.Allocator, pid: i32, exe: []const u8, compat: bool) bool {
     const z = a.dupeZ(u8, exe) catch return false;
     const link = std.fmt.allocPrintSentinel(a, "/proc/{d}/exe", .{pid}, 0) catch return false;
     var want: c.struct_stat = undefined;
     var got: c.struct_stat = undefined;
-    if (c.stat(z.ptr, &want) != 0 or c.stat(link.ptr, &got) != 0) return false;
+    if (c.stat(z.ptr, &want) != 0) return false;
+    const safe = want.st_uid == 0 and want.st_mode & 0o022 == 0;
+    if (c.stat(link.ptr, &got) != 0) return safe and compat;
     if (want.st_dev != got.st_dev or want.st_ino != got.st_ino) return false;
-    return want.st_uid == 0 and want.st_mode & 0o022 == 0;
+    return safe;
 }
 
 pub fn trusted(a: std.mem.Allocator, pid: i32) bool {
     if (pid <= 0) return false;
-    const exe = canonical(exeOf(a, pid));
+    const raw = exeOf(a, pid);
+    const exe = canonical(raw);
     if (options.test_trust.len != 0) {
         var it = std.mem.splitScalar(u8, options.test_trust, ':');
         while (it.next()) |p| {
@@ -84,7 +101,7 @@ pub fn trusted(a: std.mem.Allocator, pid: i32) bool {
         }
     }
     for (SHELLS) |s| {
-        if (std.mem.eql(u8, s, exe)) return isSameRootOwnedFile(a, pid, exe) and cleanEnv(a, pid);
+        if (std.mem.eql(u8, s, exe)) return isSameRootOwnedFile(a, pid, exe, raw.len != exe.len) and cleanEnv(a, pid);
     }
     return false;
 }
@@ -92,6 +109,14 @@ pub fn trusted(a: std.mem.Allocator, pid: i32) bool {
 test "a preloaded library spoils the environment" {
     try std.testing.expect(!envIsClean("HOME=/x\x00LD_PRELOAD=/tmp/evil.so\x00"));
     try std.testing.expect(envIsClean("HOME=/x\x00LANG=it\x00"));
+}
+
+test "system library paths do not spoil the environment" {
+    try std.testing.expect(envIsClean("LD_LIBRARY_PATH=/usr/lib:/usr/lib\x00GI_TYPELIB_PATH=/usr/lib/girepository-1.0\x00"));
+    try std.testing.expect(!envIsClean("LD_LIBRARY_PATH=/usr/lib:/tmp/evil\x00"));
+    try std.testing.expect(!envIsClean("LD_LIBRARY_PATH=/usr/lib:\x00"));
+    try std.testing.expect(!envIsClean("LD_LIBRARY_PATH=/usr/../tmp\x00"));
+    try std.testing.expect(!envIsClean("GI_TYPELIB_PATH=/home/x\x00"));
 }
 
 test "nobody is trusted without a live process" {
