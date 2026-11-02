@@ -33,6 +33,25 @@ pub fn decide(mode: Mode, risk: Risk, tainted: bool, stopped: bool) Verdict {
     };
 }
 
+pub fn decideOutsider(mode: Mode, risk: Risk, harmless: bool, stopped: bool) Verdict {
+    if (stopped) return .refuse;
+    if (harmless) return .run;
+    if (mode == .plan and risk != .read) return .refuse;
+    return .confirm;
+}
+
+pub fn rank(m: Mode) u8 {
+    return @intFromEnum(m);
+}
+
+test "an outsider gets no mode for free" {
+    try std.testing.expectEqual(Verdict.confirm, decideOutsider(.autopilot, .irreversible, false, false));
+    try std.testing.expectEqual(Verdict.confirm, decideOutsider(.autopilot, .read, false, false));
+    try std.testing.expectEqual(Verdict.run, decideOutsider(.autopilot, .read, true, false));
+    try std.testing.expectEqual(Verdict.refuse, decideOutsider(.plan, .undoable, false, false));
+    try std.testing.expectEqual(Verdict.refuse, decideOutsider(.autopilot, .read, true, true));
+}
+
 test "stop refuses everything" {
     try std.testing.expectEqual(Verdict.refuse, decide(.autopilot, .read, false, true));
 }

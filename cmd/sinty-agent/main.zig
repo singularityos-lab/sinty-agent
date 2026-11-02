@@ -86,6 +86,10 @@ pub fn main(init: std.process.Init.Minimal) void {
         _ = call("Stop", null);
     } else if (std.mem.eql(u8, cmd, "resume")) {
         _ = call("Resume", null);
+    } else if (std.mem.eql(u8, cmd, "allow-session")) {
+        const raw = it.next() orelse usage();
+        const id = std.fmt.parseInt(u32, raw, 10) catch usage();
+        _ = call("AllowSession", c.g_variant_new("(u)", id));
     } else if (std.mem.eql(u8, cmd, "mode")) {
         const m = it.next() orelse usage();
         _ = call("SetMode", c.g_variant_new("(s)", m.ptr));

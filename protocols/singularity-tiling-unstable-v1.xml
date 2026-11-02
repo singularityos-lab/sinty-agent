@@ -1,0 +1,247 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="singularity_tiling_unstable_v1">
+  <copyright>
+    Copyright © 2024 Singularity Desktop
+  </copyright>
+
+  <interface name="zsingularity_tiling_manager_v1" version="11">
+    <description summary="tiling window management">
+      This interface allows a client to manage window geometry for tiling purposes.
+    </description>
+
+    <request name="get_geometry">
+      <description summary="query window geometry">
+        Requests the current geometry of a toplevel. The compositor replies
+        with a single "geometry" event for that toplevel. Used by session
+        save to capture exact window position/size/output.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+    </request>
+
+    <event name="geometry">
+      <description summary="reported window geometry">
+        Sent in response to get_geometry. output is the connector name
+        (e.g. "DP-2"); maximized/fullscreen are 0/1.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="maximized" type="uint"/>
+      <arg name="fullscreen" type="uint"/>
+      <arg name="output" type="string"/>
+    </event>
+
+    <request name="set_geometry">
+      <description summary="set window geometry">
+        Sets the geometry of a toplevel window.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    
+    <request name="set_tiled">
+      <description summary="set tiled state">
+        Sets the tiled state of a window (removes decorations etc).
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+      <arg name="tiled" type="uint"/>
+    </request>
+
+    <enum name="snap_direction">
+      <entry name="none" value="0"/>
+      <entry name="left" value="1"/>
+      <entry name="right" value="2"/>
+      <entry name="top" value="3"/>
+      <entry name="bottom" value="4"/>
+      <entry name="top_left" value="5"/>
+      <entry name="top_right" value="6"/>
+      <entry name="bottom_left" value="7"/>
+      <entry name="bottom_right" value="8"/>
+      <entry name="maximize" value="9"/>
+    </enum>
+
+    <request name="snap_view">
+      <description summary="snap view to edge">
+        Snaps the view to a screen edge using internal compositor logic.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+      <arg name="direction" type="uint" enum="snap_direction"/>
+    </request>
+
+    <request name="move_to_workspace" since="3">
+      <description summary="move window to workspace">
+        Moves a toplevel to the workspace at the given zero-based index,
+        without requiring it to be focused. Used by the overview to drag a
+        window onto another workspace.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+      <arg name="workspace" type="uint"/>
+    </request>
+
+    <request name="get_workarea" since="4">
+      <description summary="query output work area">
+        Requests the usable area of the output containing a toplevel, excluding
+        space reserved by layer surfaces.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+    </request>
+
+    <event name="workarea" since="4">
+      <description summary="reported output work area">
+        Sent in response to get_workarea.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+
+    <request name="set_scrolling_mode" since="5">
+      <description summary="set scrolling tiling mode">
+        Enables compositor interaction rules for the scrolling layout.
+      </description>
+      <arg name="enabled" type="uint"/>
+    </request>
+
+    <request name="detach_tiled" since="5">
+      <description summary="detach a tiled window at its current geometry">
+        Returns a scrolling tiled window to floating state without restoring
+        the geometry it had before entering the layout.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+    </request>
+
+    <enum name="interaction_phase" since="5">
+      <entry name="begin" value="0"/>
+      <entry name="update" value="1"/>
+      <entry name="end" value="2"/>
+    </enum>
+
+    <enum name="interaction_kind" since="5">
+      <entry name="move" value="0"/>
+      <entry name="resize" value="1"/>
+    </enum>
+
+    <event name="interaction" since="5">
+      <description summary="interactive scrolling layout change">
+        Reports compositor-owned move and resize progress so the shell can
+        keep the rest of the scrolling strip attached to the grabbed window.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+      <arg name="phase" type="uint" enum="interaction_phase"/>
+      <arg name="kind" type="uint" enum="interaction_kind"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="cursor_x" type="int"/>
+      <arg name="cursor_y" type="int"/>
+      <arg name="edges" type="uint"/>
+      <arg name="float_candidate" type="uint"/>
+    </event>
+
+    <request name="set_drop_preview" since="6">
+      <description summary="show a scrolling layout drop target">
+        Sets or clears the compositor overlay used to preview the destination
+        of an interactive scrolling layout move.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="visible" type="uint"/>
+    </request>
+
+    <request name="get_tileable" since="7">
+      <description summary="query whether a toplevel can join the scrolling layout">
+        Requests whether a toplevel is a normal window rather than a dialog
+        or transient child.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+    </request>
+
+    <event name="tileable" since="7">
+      <description summary="reported scrolling layout eligibility">
+        Sent in response to get_tileable.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+      <arg name="tileable" type="uint"/>
+    </event>
+
+    <request name="set_close_gesture_progress" since="8">
+      <description summary="set the close gesture visual progress">
+        Desaturates a toplevel as it approaches the close threshold. A value
+        of zero clears the effect.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+      <arg name="progress" type="fixed"/>
+    </request>
+
+    <request name="get_layout_workarea" since="9">
+      <description summary="query the combined output work area">
+        Requests the common usable area across the output layout so a scrolling
+        layout can span every output as one continuous viewport.
+      </description>
+    </request>
+
+    <event name="layout_workarea" since="9">
+      <description summary="reported combined output work area">
+        Sent in response to get_layout_workarea.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+
+    <event name="layout_output_workarea" since="9">
+      <description summary="reported output work area">
+        Reports one usable output rectangle within the combined layout.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+
+    <event name="layout_workarea_done" since="9">
+      <description summary="layout work area report complete">
+        Sent after every output work area has been reported.
+      </description>
+    </event>
+
+    <request name="get_cursor_position" since="10">
+      <description summary="query cursor position">
+        Requests the current cursor position in output layout coordinates.
+      </description>
+    </request>
+
+    <event name="cursor_position" since="10">
+      <description summary="reported cursor position">
+        Sent in response to get_cursor_position.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </event>
+
+    <request name="set_geometry_animated" since="11">
+      <description summary="set a toplevel geometry and slide it there">
+        Like set_geometry, but the compositor slides the window from its
+        current position to the new one on the output frame clock. The client
+        only receives the final size, once. Compositors without animations,
+        or with reduced motion, apply the geometry directly.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+  </interface>
+</protocol>

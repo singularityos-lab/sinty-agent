@@ -6,6 +6,8 @@ const c = @cImport({
 const policy = @import("policy.zig");
 const catalog = @import("catalog.zig");
 const mcp = @import("mcp.zig");
+const wl = @import("wl.zig");
+const trust = @import("trust.zig");
 
 const EMPTY: [:0]const u8 = "";
 const BRIDGE = "/usr/libexec/sinty-agent-bridge";
@@ -16,6 +18,7 @@ const APP_IFACE = "dev.sinty.AppAgent1";
 const CALL_MS = 120000;
 const CONFIRM_US: i64 = 120 * 1000 * 1000;
 const LINE_MAX = 16 * 1024 * 1024;
+const DENIED = "org.freedesktop.DBus.Error.AccessDenied";
 
 const XML =
     \\<node>
@@ -26,13 +29,14 @@ const XML =
     \\    <method name="Stop"/>
     \\    <method name="Resume"/>
     \\    <method name="Answer"><arg name="id" type="u" direction="in"/><arg name="allow" type="b" direction="in"/></method>
+    \\    <method name="AllowSession"><arg name="id" type="u" direction="in"/></method>
     \\    <signal name="ConfirmRequested"><arg name="id" type="u"/><arg name="text" type="s"/></signal>
     \\    <signal name="ActionDone"><arg name="tool" type="s"/><arg name="outcome" type="s"/></signal>
     \\  </interface>
     \\</node>
 ;
 
-const Answer = enum { none, allow, deny };
+const Answer = enum { none, allow, session, deny };
 
 var bus: ?*c.GDBusConnection = null;
 var lock: c.GMutex = undefined;
@@ -45,9 +49,22 @@ var answer: Answer = .none;
 var guest_open = false;
 var receipts_path: [:0]const u8 = "";
 
+const Kind = enum { trusted, outsider, guest };
+
 const Session = struct {
     tainted: bool = false,
+    kind: Kind = .outsider,
+    peer: []const u8 = "unknown",
 };
+
+const HARMLESS = [_][]const u8{ "agent_status", "apps_list", "app_intents" };
+
+fn harmless(name: []const u8) bool {
+    for (HARMLESS) |h| {
+        if (std.mem.eql(u8, h, name)) return true;
+    }
+    return false;
+}
 
 fn vt(s: [*:0]const u8) *const c.GVariantType {
     return @ptrCast(s);
@@ -77,7 +94,7 @@ fn emit(signal: [*:0]const u8, params: *c.GVariant) void {
     _ = c.g_dbus_connection_emit_signal(bus, null, PATH, IFACE, signal, params, null);
 }
 
-fn confirm(a: std.mem.Allocator, tool: []const u8, args: std.json.Value) bool {
+fn confirm(a: std.mem.Allocator, who: []const u8, tool: []const u8, args: std.json.Value) Answer {
     c.g_mutex_lock(&lock);
     defer c.g_mutex_unlock(&lock);
     while (waiting != 0) c.g_cond_wait(&changed, &lock);
@@ -86,16 +103,16 @@ fn confirm(a: std.mem.Allocator, tool: []const u8, args: std.json.Value) bool {
     waiting = id;
     answer = .none;
     const shown = std.json.Stringify.valueAlloc(a, args, .{}) catch "";
-    const text = std.fmt.allocPrintSentinel(a, "{s} {s}", .{ tool, shown }, 0) catch "";
+    const text = std.fmt.allocPrintSentinel(a, "{s}: {s} {s}", .{ who, tool, shown }, 0) catch "";
     emit("ConfirmRequested", c.g_variant_new("(us)", id, text.ptr).?);
     const end = c.g_get_monotonic_time() + CONFIRM_US;
     while (answer == .none and !stopped) {
         if (c.g_cond_wait_until(&changed, &lock, end) == 0) break;
     }
-    const ok = answer == .allow and !stopped;
+    const r: Answer = if (stopped or answer == .none) .deny else answer;
     waiting = 0;
     c.g_cond_broadcast(&changed);
-    return ok;
+    return r;
 }
 
 fn str(args: std.json.Value, key: []const u8) ?[:0]const u8 {
@@ -380,6 +397,12 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "settings_set")) return settingsSet(args);
     if (std.mem.eql(u8, name, "dbus_call")) return dbusCall(a, args);
     if (std.mem.eql(u8, name, "shell_run")) return shellRun(a, args);
+    if (std.mem.eql(u8, name, "windows_list")) return wl.windows(a);
+    if (std.mem.eql(u8, name, "window_set")) return wl.windowSet(args);
+    if (std.mem.eql(u8, name, "window_close")) return wl.windowClose(args);
+    if (std.mem.eql(u8, name, "screen_capture")) return wl.capture(a, args);
+    if (std.mem.eql(u8, name, "pointer")) return wl.pointer(args);
+    if (std.mem.eql(u8, name, "keyboard")) return wl.keyboard(a, args);
     if (std.mem.eql(u8, name, "app_context")) {
         const app = str(args, "app") orelse return fail("missing app");
         return appCall(a, app, APP_IFACE, "Context", null, "(s)");
@@ -396,14 +419,19 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
         return o;
     };
     c.g_mutex_lock(&lock);
-    const verdict = policy.decide(mode, risk, session.tainted, stopped);
+    const verdict = if (session.kind == .trusted)
+        policy.decide(mode, risk, session.tainted, stopped)
+    else
+        policy.decideOutsider(mode, risk, harmless(name), stopped);
     c.g_mutex_unlock(&lock);
     var label: []const u8 = @tagName(verdict);
     var o: mcp.Outcome = undefined;
     switch (verdict) {
         .refuse => o = fail("refused by the current mode"),
         .confirm => {
-            if (confirm(a, name, args)) {
+            const r = confirm(a, session.peer, name, args);
+            if (r == .session and session.kind == .outsider) session.kind = .trusted;
+            if (r == .allow or r == .session) {
                 label = "confirmed";
                 o = run(a, name, args);
             } else {
@@ -413,7 +441,7 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
         },
         .run => o = run(a, name, args),
     }
-    if (!o.failed and (std.mem.eql(u8, name, "app_context") or std.mem.eql(u8, name, "shell_run") or std.mem.eql(u8, name, "dbus_call") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
+    if (!o.failed and (std.mem.eql(u8, name, "app_context") or std.mem.eql(u8, name, "screen_capture") or std.mem.eql(u8, name, "windows_list") or std.mem.eql(u8, name, "shell_run") or std.mem.eql(u8, name, "dbus_call") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
     receipt(a, name, args, label, o);
     const tz = a.dupeZ(u8, name) catch return o;
     const lz = a.dupeZ(u8, label) catch return o;
@@ -421,10 +449,18 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
     return o;
 }
 
-fn serve(fd: c_int) void {
+fn serve(fd: c_int, guest: bool) void {
     defer _ = std.c.close(fd);
     const gpa = std.heap.c_allocator;
     var session: Session = .{};
+    const pid = trust.peerPid(fd);
+    if (guest) {
+        session.kind = .guest;
+        session.peer = "dsh";
+    } else {
+        session.peer = trust.exeOf(gpa, pid);
+        if (trust.trusted(gpa, pid)) session.kind = .trusted;
+    }
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(gpa);
     var buf: [65536]u8 = undefined;
@@ -455,11 +491,11 @@ fn writeAll(fd: c_int, data: []const u8) bool {
     return true;
 }
 
-fn acceptLoop(listener: c_int) void {
+fn acceptLoop(listener: c_int, guest: bool) void {
     while (true) {
         const fd = std.c.accept(listener, null, null);
         if (fd < 0) continue;
-        const t = std.Thread.spawn(.{}, serve, .{fd}) catch {
+        const t = std.Thread.spawn(.{}, serve, .{ fd, guest }) catch {
             _ = std.c.close(fd);
             continue;
         };
@@ -502,7 +538,7 @@ fn openGuestBridge(inv: ?*c.GDBusMethodInvocation) void {
     guest_open = true;
     c.g_mutex_unlock(&lock);
     if (fresh) {
-        const t = std.Thread.spawn(.{}, acceptLoop, .{listen(sock)}) catch {
+        const t = std.Thread.spawn(.{}, acceptLoop, .{ listen(sock), true }) catch {
             c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.Failed", "cannot start the listener");
             return;
         };
@@ -511,7 +547,29 @@ fn openGuestBridge(inv: ?*c.GDBusMethodInvocation) void {
     c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(ss)", sock.ptr, bridge.ptr));
 }
 
-fn onMethod(_: ?*c.GDBusConnection, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8, method: [*c]const u8, params: ?*c.GVariant, inv: ?*c.GDBusMethodInvocation, _: c.gpointer) callconv(.c) void {
+fn callerTrusted(a: std.mem.Allocator, sender: [*c]const u8) bool {
+    return trust.trusted(a, callerPid(sender));
+}
+
+fn callerPid(sender: [*c]const u8) i32 {
+    const r = c.g_dbus_connection_call_sync(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetConnectionUnixProcessID", c.g_variant_new("(s)", sender), vt("(u)"), c.G_DBUS_CALL_FLAGS_NONE, 5000, null, null) orelse return 0;
+    defer c.g_variant_unref(r);
+    var pid: c.guint32 = 0;
+    c.g_variant_get(r, "(u)", &pid);
+    return @intCast(pid);
+}
+
+fn guestAsk(inv: ?*c.GDBusMethodInvocation) void {
+    const who = "a program that wants to open the dsh bridge";
+    const r = confirm(std.heap.c_allocator, who, "open_guest_bridge", .null);
+    if (r == .allow or r == .session) {
+        openGuestBridge(inv);
+    } else {
+        c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "the user did not allow this");
+    }
+}
+
+fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*c]const u8, method: [*c]const u8, params: ?*c.GVariant, inv: ?*c.GDBusMethodInvocation, _: c.gpointer) callconv(.c) void {
     const m = std.mem.span(method);
     if (std.mem.eql(u8, m, "GetStatus")) {
         const a = std.heap.c_allocator;
@@ -519,8 +577,23 @@ fn onMethod(_: ?*c.GDBusConnection, _: [*c]const u8, _: [*c]const u8, _: [*c]con
         c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(s)", s.ptr));
         return;
     }
+    var scratch = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer scratch.deinit();
+    const allowed = callerTrusted(scratch.allocator(), sender);
     if (std.mem.eql(u8, m, "OpenGuestBridge")) {
-        openGuestBridge(inv);
+        if (allowed) {
+            openGuestBridge(inv);
+            return;
+        }
+        const t = std.Thread.spawn(.{}, guestAsk, .{inv}) catch {
+            c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "cannot ask the user");
+            return;
+        };
+        t.detach();
+        return;
+    }
+    if (!allowed and (std.mem.eql(u8, m, "Resume") or std.mem.eql(u8, m, "Answer") or std.mem.eql(u8, m, "AllowSession"))) {
+        c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop shell can do this");
         return;
     }
     c.g_mutex_lock(&lock);
@@ -528,10 +601,15 @@ fn onMethod(_: ?*c.GDBusConnection, _: [*c]const u8, _: [*c]const u8, _: [*c]con
     if (std.mem.eql(u8, m, "SetMode")) {
         var s: [*c]const u8 = null;
         c.g_variant_get(params, "(&s)", &s);
-        mode = policy.Mode.parse(std.mem.span(s)) orelse {
+        const wanted = policy.Mode.parse(std.mem.span(s)) orelse {
             c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.InvalidArgs", "unknown mode");
             return;
         };
+        if (policy.rank(wanted) > policy.rank(mode) and !allowed) {
+            c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop shell can raise the mode");
+            return;
+        }
+        mode = wanted;
     } else if (std.mem.eql(u8, m, "Stop")) {
         stopped = true;
         c.g_cond_broadcast(&changed);
@@ -543,6 +621,13 @@ fn onMethod(_: ?*c.GDBusConnection, _: [*c]const u8, _: [*c]const u8, _: [*c]con
         c.g_variant_get(params, "(ub)", &id, &allow);
         if (id == waiting and id != 0) {
             answer = if (allow != 0) .allow else .deny;
+            c.g_cond_broadcast(&changed);
+        }
+    } else if (std.mem.eql(u8, m, "AllowSession")) {
+        var id: c.guint32 = 0;
+        c.g_variant_get(params, "(u)", &id);
+        if (id == waiting and id != 0) {
+            answer = .session;
             c.g_cond_broadcast(&changed);
         }
     }
@@ -580,7 +665,7 @@ pub fn main() void {
     receipts_path = std.fmt.allocPrintSentinel(a, "{s}/receipts.jsonl", .{sdir}, 0) catch fatal("out of memory", .{});
 
     const listener = listen(sock);
-    const t = std.Thread.spawn(.{}, acceptLoop, .{listener}) catch fatal("cannot start the listener", .{});
+    const t = std.Thread.spawn(.{}, acceptLoop, .{ listener, false }) catch fatal("cannot start the listener", .{});
     t.detach();
 
     _ = c.g_bus_own_name_on_connection(bus, NAME, c.G_BUS_NAME_OWNER_FLAGS_NONE, onBus, onLost, null, null);

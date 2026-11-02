@@ -1,5 +1,31 @@
 const std = @import("std");
 
+const PROTOCOLS = [_][]const u8{
+    "wlr-foreign-toplevel-management-unstable-v1",
+    "singularity-tiling-unstable-v1",
+    "singularity-preview-unstable-v1",
+    "singularity-process-unstable-v1",
+    "virtual-keyboard-unstable-v1",
+    "wlr-virtual-pointer-unstable-v1",
+    "wlr-screencopy-unstable-v1",
+    "xdg-output-unstable-v1",
+};
+
+fn protocols(b: *std.Build, mod: *std.Build.Module) void {
+    mod.linkSystemLibrary("wayland-client", .{});
+    mod.linkSystemLibrary("z", .{});
+    for (PROTOCOLS) |p| {
+        const xml = b.path(b.fmt("protocols/{s}.xml", .{p}));
+        const h = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
+        h.addFileArg(xml);
+        const header = h.addOutputFileArg(b.fmt("{s}-client-protocol.h", .{p}));
+        mod.addIncludePath(header.dirname());
+        const src = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
+        src.addFileArg(xml);
+        mod.addCSourceFile(.{ .file = src.addOutputFileArg(b.fmt("{s}.c", .{p})), .flags = &.{} });
+    }
+}
+
 fn exe(b: *std.Build, name: []const u8, root: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const mod = b.createModule(.{
         .root_source_file = b.path(root),
@@ -10,6 +36,12 @@ fn exe(b: *std.Build, name: []const u8, root: []const u8, target: std.Build.Reso
     mod.addIncludePath(b.path("cmd/sinty-agentd"));
     mod.linkSystemLibrary("gio-2.0", .{});
     mod.linkSystemLibrary("gio-unix-2.0", .{});
+    if (std.mem.eql(u8, name, "sinty-agentd")) {
+        protocols(b, mod);
+        const o = b.addOptions();
+        o.addOption([]const u8, "test_trust", b.option([]const u8, "test-trust", "extra trusted programs, for tests only") orelse "");
+        mod.addOptions("build_options", o);
+    }
     b.installArtifact(b.addExecutable(.{ .name = name, .root_module = mod }));
 }
 

@@ -67,6 +67,42 @@ pub const TOOLS = [_]Tool{
         .risk = .undoable,
     },
     .{
+        .name = "windows_list",
+        .description = "List every open window of every application, Singularity or not: id, app_id, title, pid, position and size in screen points, output and state. Ids stay valid while the window is open.",
+        .schema = NONE,
+        .risk = .read,
+    },
+    .{
+        .name = "window_set",
+        .description = "Control a window from the compositor. action is focus, minimize, unminimize, maximize, unmaximize, fullscreen, unfullscreen, move_resize (x, y, width, height), snap (direction) or workspace (workspace).",
+        .schema = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"},\"action\":{\"type\":\"string\",\"enum\":[\"focus\",\"minimize\",\"unminimize\",\"maximize\",\"unmaximize\",\"fullscreen\",\"unfullscreen\",\"move_resize\",\"snap\",\"workspace\"]},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},\"direction\":{\"type\":\"string\",\"enum\":[\"left\",\"right\",\"top\",\"bottom\",\"top_left\",\"top_right\",\"bottom_left\",\"bottom_right\",\"maximize\"]},\"workspace\":{\"type\":\"integer\"}},\"required\":[\"id\",\"action\"]}",
+        .risk = .undoable,
+    },
+    .{
+        .name = "window_close",
+        .description = "Ask a window to close, as its close button would.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}},\"required\":[\"id\"]}",
+        .risk = .irreversible,
+    },
+    .{
+        .name = "screen_capture",
+        .description = "Return an image of one window (window) or one screen (output, or the first). The text says how image pixels map to screen points.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"window\":{\"type\":\"integer\"},\"output\":{\"type\":\"string\"}}}",
+        .risk = .read,
+    },
+    .{
+        .name = "pointer",
+        .description = "Use the mouse on any window. x and y are screen points, or relative to the window when window is given, which is also focused first. action is move, click, double_click, right_click, middle_click, scroll (amount in notches, axis) or drag (to_x, to_y).",
+        .schema = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"move\",\"click\",\"double_click\",\"right_click\",\"middle_click\",\"scroll\",\"drag\"]},\"window\":{\"type\":\"integer\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"},\"to_x\":{\"type\":\"integer\"},\"to_y\":{\"type\":\"integer\"},\"amount\":{\"type\":\"integer\"},\"axis\":{\"type\":\"string\",\"enum\":[\"vertical\",\"horizontal\"]}},\"required\":[\"action\",\"x\",\"y\"]}",
+        .risk = .irreversible,
+    },
+    .{
+        .name = "keyboard",
+        .description = "Use the keyboard on the focused window, or on window after focusing it. text types any Unicode text; keys presses one combination such as ctrl+shift+t, enter or f5.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"keys\":{\"type\":\"string\"},\"window\":{\"type\":\"integer\"}}}",
+        .risk = .irreversible,
+    },
+    .{
         .name = "settings_get",
         .description = "Read a setting by GSettings schema and key, or list the keys of a schema when key is omitted.",
         .schema = "{\"type\":\"object\",\"properties\":{\"schema\":{\"type\":\"string\"},\"key\":{\"type\":\"string\"}},\"required\":[\"schema\"]}",

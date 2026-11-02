@@ -4,6 +4,7 @@ const catalog = @import("catalog.zig");
 pub const Outcome = struct {
     text: []const u8,
     failed: bool = false,
+    image: ?[]const u8 = null,
 };
 
 pub const Host = struct {
@@ -49,7 +50,8 @@ pub fn handle(a: std.mem.Allocator, line: []const u8, host: Host) !?[]u8 {
         const args = params.?.object.get("arguments") orelse std.json.Value{ .object = .empty };
         const o = host.call(host.ctx, a, name.string, args);
         const text = try std.json.Stringify.valueAlloc(a, o.text, .{});
-        return try reply(a, id, try std.fmt.allocPrint(a, "{{\"content\":[{{\"type\":\"text\",\"text\":{s}}}],\"isError\":{}}}", .{ text, o.failed }));
+        const img = if (o.image) |b| try std.fmt.allocPrint(a, ",{{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":\"{s}\"}}", .{b}) else "";
+        return try reply(a, id, try std.fmt.allocPrint(a, "{{\"content\":[{{\"type\":\"text\",\"text\":{s}}}{s}],\"isError\":{}}}", .{ text, img, o.failed }));
     }
     return try failure(a, id, -32601, "method not found");
 }
