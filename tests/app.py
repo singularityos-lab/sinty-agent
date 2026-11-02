@@ -36,23 +36,47 @@ def invoke(intent, **k):
     return tool("app_invoke", app=APP, intent=intent, args=k)
 req("initialize", {"protocolVersion": "2025-06-18"})
 e, t = tool("app_intents", app=APP)
-check("intents listed", not e and "note_create" in t, t + open(home + "/app.log").read()[-400:] + open(home + "/wm.log").read()[-300:])
+check("intents listed", not e and json.loads(t)["intents"], t + open(home + "/app.log").read()[-400:] + open(home + "/wm.log").read()[-300:])
 if fails:
     sys.exit(1)
-e, t = invoke("note_create", title="Prova", markdown="uno")
-check("create", not e and '"Prova"' in t, t)
-nid = json.loads(t)["id"] if not e else ""
-e, t = invoke("note_append", id=nid, markdown="due")
-check("append", not e, t)
-e, t = invoke("note_read", id=nid)
-check("read back", not e and "uno" in t and "due" in t, t)
-e, t = invoke("note_search", query="Prova")
-check("search", not e and nid in t, t)
-e, t = tool("app_context", app=APP)
-check("context", not e, t)
-check("file on disk", any("due" in open(os.path.join(r, f), errors="ignore").read() for r, _, fs in os.walk(home) for f in fs if f.endswith(".md")))
-e, t = invoke("nope")
-check("unknown intent fails", e, t)
+
+def notes():
+    e, t = invoke("note_create", title="Prova", markdown="uno")
+    check("create", not e and '"Prova"' in t, t)
+    nid = json.loads(t)["id"]
+    check("append", not invoke("note_append", id=nid, markdown="due")[0])
+    e, t = invoke("note_read", id=nid)
+    check("read back", not e and "uno" in t and "due" in t, t)
+    e, t = invoke("note_search", query="Prova")
+    check("search", not e and nid in t, t)
+    check("file on disk", any("due" in open(os.path.join(r, f), errors="ignore").read() for r, _, fs in os.walk(home) for f in fs if f.endswith(".md")))
+
+def tasks():
+    e, t = invoke("task_add", text="Comprare il pane")
+    check("add", not e and "pane" in t, t)
+    uid = json.loads(t)["uid"]
+    e, t = invoke("task_search", query="pane")
+    check("search", not e and uid in t, t)
+    check("complete", not invoke("task_complete", uid=uid)[0])
+    time.sleep(1)
+    e, t = invoke("task_list", completed=True)
+    check("listed done", not e and uid in t, t)
+
+def camera():
+    e, t = invoke("camera_last")
+    check("last without shots", not e and json.loads(t)["path"] == "", t)
+    tool_mode("autopilot")
+    e, t = invoke("camera_photo")
+    check("no camera reported", e and "camera" in t, t)
+
+def tool_mode(m):
+    subprocess.run([BIN + "/sinty-agent", "mode", m], capture_output=True, timeout=10)
+
+{"dev.sinty.notes": notes, "dev.sinty.tasks": tasks, "dev.sinty.camera": camera}[APP]()
+check("context", not tool("app_context", app=APP)[0])
+check("unknown intent fails", invoke("nope")[0])
+tool_mode("plan")
+check("plan refuses writes", APP == "dev.sinty.camera" or invoke({"dev.sinty.notes": "note_create", "dev.sinty.tasks": "task_add"}[APP], title="x", text="x")[0])
 try:
     bus = Gio.bus_get_sync(Gio.BusType.SESSION)
     path = "/" + APP.replace(".", "/").replace("-", "_")
