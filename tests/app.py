@@ -12,7 +12,7 @@ for x in os.listdir(os.environ["XDG_RUNTIME_DIR"]):
         env["WAYLAND_DISPLAY"] = x
 d = subprocess.Popen([BIN + "/sinty-agentd"], env=env)
 time.sleep(1)
-a = subprocess.Popen([EXE, "--gapplication-service"], env=env, stdout=subprocess.DEVNULL, stderr=open(home + "/app.log", "w"))
+a = subprocess.Popen([EXE] + ([] if APP == "dev.sinty.files" else ["--gapplication-service"]), env=env, stdout=subprocess.DEVNULL, stderr=open(home + "/app.log", "w"))
 time.sleep(6)
 s = socket.socket(socket.AF_UNIX)
 s.connect(os.environ["XDG_RUNTIME_DIR"] + "/sinty-agent/mcp.sock")
@@ -69,14 +69,44 @@ def camera():
     e, t = invoke("camera_photo")
     check("no camera reported", e and "camera" in t, t)
 
+def files():
+    root = home + "/t"
+    os.makedirs(root)
+    open(root + "/a.txt", "w").write("x")
+    e, t = invoke("files_list", path=root)
+    check("list", not e and "a.txt" in t, t)
+    check("relative refused", invoke("files_list", path="t")[0])
+    check("copy", not invoke("files_copy", to=root + "/b.txt", **{"from": root + "/a.txt"})[0] and os.path.exists(root + "/b.txt"))
+    check("copy never overwrites", invoke("files_copy", to=root + "/b.txt", **{"from": root + "/a.txt"})[0])
+    check("move", not invoke("files_move", to=root + "/c.txt", **{"from": root + "/b.txt"})[0] and os.path.exists(root + "/c.txt"))
+    check("mkdir", not invoke("files_mkdir", path=root + "/d/e")[0] and os.path.isdir(root + "/d/e"))
+    check("show", not invoke("files_show", path=root)[0])
+
+def edit():
+    p = home + "/doc.txt"
+    open(p, "w").write("ciao\n")
+    e, t = invoke("edit_open", path=p)
+    check("open", not e and "doc.txt" in t, t)
+    time.sleep(2)
+    e, t = invoke("edit_read")
+    check("read", not e and "ciao" in t, t)
+    check("insert", not invoke("edit_insert", text="scritto dal vivo ")[0])
+    e, t = invoke("edit_read")
+    check("insert visible", not e and "scritto dal vivo" in t, t)
+    tool_mode("autopilot")
+    check("save", not invoke("edit_save")[0])
+    time.sleep(1)
+    check("saved on disk", "scritto dal vivo" in open(p).read(), open(p).read())
+
 def tool_mode(m):
     subprocess.run([BIN + "/sinty-agent", "mode", m], capture_output=True, timeout=10)
 
-{"dev.sinty.notes": notes, "dev.sinty.tasks": tasks, "dev.sinty.camera": camera}[APP]()
+{"dev.sinty.notes": notes, "dev.sinty.tasks": tasks, "dev.sinty.camera": camera, "dev.sinty.files": files, "dev.sinty.edit": edit}[APP]()
 check("context", not tool("app_context", app=APP)[0])
 check("unknown intent fails", invoke("nope")[0])
 tool_mode("plan")
-check("plan refuses writes", APP == "dev.sinty.camera" or invoke({"dev.sinty.notes": "note_create", "dev.sinty.tasks": "task_add"}[APP], title="x", text="x")[0])
+w = {"dev.sinty.notes": "note_create", "dev.sinty.tasks": "task_add", "dev.sinty.files": "files_mkdir", "dev.sinty.edit": "edit_insert"}.get(APP)
+check("plan refuses writes", w is None or invoke(w, title="x", text="x", path="/nonexistent/x")[0])
 try:
     bus = Gio.bus_get_sync(Gio.BusType.SESSION)
     path = "/" + APP.replace(".", "/").replace("-", "_")
