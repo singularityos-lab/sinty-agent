@@ -488,10 +488,24 @@ fn settle() void {
     c.g_usleep(WAIT_STEP_US * 3);
 }
 
+const CONSENT = [_][]const u8{ "dev.sinty.portal.consent", "dev.sinty.screencast.chooser", "dev.sinty.polkit", "zenity" };
+const CONSENT_OPEN = "a consent window is open: only the user can answer it";
+
+fn consentOpen() bool {
+    _ = c.wl_display_roundtrip(display);
+    for (wins.items) |w| {
+        for (CONSENT) |id| {
+            if (std.mem.eql(u8, w.app, id)) return true;
+        }
+    }
+    return false;
+}
+
 pub fn pointer(args: std.json.Value) mcp.Outcome {
     const action = text(args, "action") orelse return fail("missing action");
     if (!enter()) return fail(NO_COMPOSITOR);
     defer leave();
+    if (consentOpen()) return fail(CONSENT_OPEN);
     if (vptrMgr == null) return fail("the compositor does not allow this");
     if (vptr == null) vptr = c.zwlr_virtual_pointer_manager_v1_create_virtual_pointer(vptrMgr, seat);
     refresh();
@@ -606,6 +620,7 @@ pub fn keyboard(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     if ((typed == null) == (keys == null)) return fail("give either text or keys");
     if (!enter()) return fail(NO_COMPOSITOR);
     defer leave();
+    if (consentOpen()) return fail(CONSENT_OPEN);
     if (vkbdMgr == null) return fail("the compositor does not allow this");
     if (int(args, "window")) |id| {
         _ = c.wl_display_roundtrip(display);

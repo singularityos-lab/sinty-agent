@@ -103,6 +103,18 @@ pub const TOOLS = [_]Tool{
         .risk = .irreversible,
     },
     .{
+        .name = "settings_schemas",
+        .description = "List the settings schemas installed on the system. Optional query filters by text, such as dev.sinty.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}",
+        .risk = .read,
+    },
+    .{
+        .name = "app_settings",
+        .description = "Describe what a Singularity app shows in its settings page: every item with label, type, options and current value, ready for settings_set. Without app, list the apps that have one.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"app\":{\"type\":\"string\"}}}",
+        .risk = .read,
+    },
+    .{
         .name = "settings_get",
         .description = "Read a setting by GSettings schema and key, or list the keys of a schema when key is omitted.",
         .schema = "{\"type\":\"object\",\"properties\":{\"schema\":{\"type\":\"string\"},\"key\":{\"type\":\"string\"}},\"required\":[\"schema\"]}",
@@ -110,8 +122,8 @@ pub const TOOLS = [_]Tool{
     },
     .{
         .name = "settings_set",
-        .description = "Change a setting. value is written in GVariant text format, such as true, 3 or 'dark'.",
-        .schema = "{\"type\":\"object\",\"properties\":{\"schema\":{\"type\":\"string\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"schema\",\"key\",\"value\"]}",
+        .description = "Change a setting. value is written in GVariant text format, such as true, 3 or 'dark'. path is needed only for a relocatable schema.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"schema\":{\"type\":\"string\"},\"key\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"schema\",\"key\",\"value\"]}",
         .risk = .undoable,
     },
     .{

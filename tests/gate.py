@@ -100,6 +100,21 @@ check("unknown schema", e)
 check("shell needs dsh", tool("shell_run", command="true")[0] or True)
 cli("mode", "ask")
 r = open(os.environ["XDG_STATE_HOME"] + "/sinty-agent/receipts.jsonl").read().splitlines()
+cli("mode", "autopilot")
+e, t = tool("settings_schemas", query="org.gtk")[:2]
+check("schemas listed", not e and "org.gtk" in t)
+sd = os.environ["XDG_DATA_HOME"] + "/singularity/app-settings"
+os.makedirs(sd, exist_ok=True)
+sc = next(x for x in json.loads(t) if "Settings" in x or x)
+keys = tool("settings_get", schema=sc)[1].split(",")
+open(sd + "/org.example.app.json", "w").write(json.dumps({"schema-id": sc, "settings": [{"key": keys[0], "label": "Prova", "type": "string"}]}))
+e, t = tool("app_settings")[:2]
+check("apps with settings listed", not e and "org.example.app" in t)
+e, t = tool("app_settings", app="org.example.app")[:2]
+check("app settings carry the value", not e and '"value"' in t and '"schema"' in t)
+check("traversal refused", tool("app_settings", app="../x")[0])
+check("no page", tool("app_settings", app="org.none")[0])
+cli("mode", "ask")
 check("receipts written", len(r) >= 10 and any(json.loads(x)["tool"] == "app_invoke" for x in r))
 m = os.stat(run + "/sinty-agent/mcp.sock").st_mode & 0o777
 check("socket private", m == 0o600)

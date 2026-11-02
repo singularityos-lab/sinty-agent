@@ -324,6 +324,96 @@ fn settingsGet(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     return .{ .text = a.dupe(u8, std.mem.span(joined)) catch "" };
 }
 
+fn settingsSchemas(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const source = c.g_settings_schema_source_get_default() orelse return fail("no settings on this system");
+    var plain: [*c][*c]u8 = null;
+    var moved: [*c][*c]u8 = null;
+    c.g_settings_schema_source_list_schemas(source, 1, &plain, &moved);
+    defer c.g_strfreev(plain);
+    defer c.g_strfreev(moved);
+    const query = str(args, "query");
+    var names: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (plain[i] != null) : (i += 1) {
+        const n = std.mem.span(plain[i]);
+        if (query == null or std.mem.indexOf(u8, n, query.?) != null) names.append(a, n) catch {};
+    }
+    return .{ .text = std.json.Stringify.valueAlloc(a, names.items, .{}) catch "[]" };
+}
+
+fn descriptorDirs(a: std.mem.Allocator) []const [:0]const u8 {
+    var dirs: std.ArrayList([:0]const u8) = .empty;
+    const user = std.mem.span(c.g_get_user_data_dir());
+    dirs.append(a, std.fmt.allocPrintSentinel(a, "{s}/singularity/app-settings", .{user}, 0) catch return dirs.items) catch {};
+    const system = c.g_get_system_data_dirs();
+    var i: usize = 0;
+    while (system[i] != null) : (i += 1) {
+        const s = std.fmt.allocPrintSentinel(a, "{s}/singularity/app-settings", .{std.mem.span(system[i])}, 0) catch continue;
+        dirs.append(a, s) catch {};
+    }
+    return dirs.items;
+}
+
+fn currentValue(a: std.mem.Allocator, schema: []const u8, path: ?[]const u8, key: []const u8) ?[]const u8 {
+    const sz = a.dupeZ(u8, schema) catch return null;
+    const kz = a.dupeZ(u8, key) catch return null;
+    const found = findSchema(sz) orelse return null;
+    defer c.g_settings_schema_unref(found);
+    if (c.g_settings_schema_has_key(found, kz.ptr) == 0) return null;
+    const pz: ?[:0]u8 = if (path) |p| a.dupeZ(u8, p) catch null else null;
+    const s = c.g_settings_new_full(found, null, if (pz) |p| p.ptr else null);
+    defer c.g_object_unref(s);
+    const v = c.g_settings_get_value(s, kz.ptr);
+    defer c.g_variant_unref(v);
+    return a.dupe(u8, std.mem.span(c.g_variant_print(v, 0))) catch null;
+}
+
+fn fileOf(path: [:0]const u8) ?[]const u8 {
+    var raw: [*c]u8 = null;
+    var len: c.gsize = 0;
+    if (c.g_file_get_contents(path.ptr, &raw, &len, null) == 0) return null;
+    return raw[0..len];
+}
+
+fn appSettings(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const dirs = descriptorDirs(a);
+    const app = str(args, "app") orelse {
+        var names: std.ArrayList([]const u8) = .empty;
+        for (dirs) |d| {
+            const h = c.g_dir_open(d.ptr, 0, null) orelse continue;
+            defer c.g_dir_close(h);
+            while (c.g_dir_read_name(h)) |n| {
+                const name = std.mem.span(n);
+                if (std.mem.endsWith(u8, name, ".json")) names.append(a, a.dupe(u8, name[0 .. name.len - 5]) catch continue) catch {};
+            }
+        }
+        return .{ .text = std.json.Stringify.valueAlloc(a, names.items, .{}) catch "[]" };
+    };
+    if (std.mem.indexOfScalar(u8, app, '/') != null) return fail("bad app id");
+    for (dirs) |d| {
+        const path = std.fmt.allocPrintSentinel(a, "{s}/{s}.json", .{ d, app }, 0) catch continue;
+        const raw = fileOf(path) orelse continue;
+        const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, raw, .{}) catch return fail("broken descriptor");
+        if (parsed != .object) return fail("broken descriptor");
+        const items = parsed.object.get("settings") orelse return fail("no settings");
+        if (items != .array) return fail("broken descriptor");
+        const dflt = parsed.object.get("schema-id");
+        for (items.array.items) |*it| {
+            if (it.* != .object) continue;
+            const key = it.object.get("key") orelse continue;
+            if (key != .string) continue;
+            const sv = it.object.get("schema-id") orelse dflt orelse continue;
+            if (sv != .string) continue;
+            const pv = it.object.get("path");
+            const value = currentValue(a, sv.string, if (pv != null and pv.? == .string) pv.?.string else null, key.string) orelse continue;
+            it.object.put(a, "value", .{ .string = value }) catch {};
+            it.object.put(a, "schema", .{ .string = sv.string }) catch {};
+        }
+        return .{ .text = std.json.Stringify.valueAlloc(a, parsed, .{}) catch return fail("out of memory") };
+    }
+    return fail("this application has no settings page");
+}
+
 fn settingsSet(args: std.json.Value) mcp.Outcome {
     const name = str(args, "schema") orelse return fail("missing schema");
     const key = str(args, "key") orelse return fail("missing key");
@@ -336,7 +426,8 @@ fn settingsSet(args: std.json.Value) mcp.Outcome {
     var err: [*c]c.GError = null;
     const v = c.g_variant_parse(c.g_settings_schema_key_get_value_type(k), raw.ptr, null, null, &err);
     if (v == null) return gerror(std.heap.c_allocator, &err);
-    const s = c.g_settings_new(name.ptr);
+    const relocatable = str(args, "path");
+    const s = c.g_settings_new_full(schema, null, if (relocatable) |p| p.ptr else null);
     defer c.g_object_unref(s);
     if (c.g_settings_set_value(s, key.ptr, v) == 0) return fail("this key cannot be written");
     c.g_settings_sync();
@@ -393,6 +484,8 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "mail_compose")) return mailCompose(a, args);
     if (std.mem.eql(u8, name, "open_uri")) return openUri(args);
     if (std.mem.eql(u8, name, "notify")) return notify(args);
+    if (std.mem.eql(u8, name, "settings_schemas")) return settingsSchemas(a, args);
+    if (std.mem.eql(u8, name, "app_settings")) return appSettings(a, args);
     if (std.mem.eql(u8, name, "settings_get")) return settingsGet(a, args);
     if (std.mem.eql(u8, name, "settings_set")) return settingsSet(args);
     if (std.mem.eql(u8, name, "dbus_call")) return dbusCall(a, args);
