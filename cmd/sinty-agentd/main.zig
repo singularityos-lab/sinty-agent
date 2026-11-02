@@ -135,7 +135,7 @@ fn appCall(a: std.mem.Allocator, app: [:0]const u8, iface: [*:0]const u8, method
     return .{ .text = "done" };
 }
 
-fn intentRisk(a: std.mem.Allocator, app: [:0]const u8, intent: []const u8) policy.Risk {
+fn intentRisk(a: std.mem.Allocator, app: [:0]const u8, intent: []const u8) ?policy.Risk {
     const o = appCall(a, app, APP_IFACE, "ListIntents", null, "(s)");
     if (o.failed) return .irreversible;
     const v = std.json.parseFromSliceLeaky(std.json.Value, a, o.text, .{}) catch return .irreversible;
@@ -147,7 +147,7 @@ fn intentRisk(a: std.mem.Allocator, app: [:0]const u8, intent: []const u8) polic
         const r = item.object.get("risk") orelse return .irreversible;
         return if (r == .string) policy.Risk.parse(r.string) else .irreversible;
     }
-    return .irreversible;
+    return null;
 }
 
 fn appsList(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
@@ -243,7 +243,7 @@ fn status(a: std.mem.Allocator) []const u8 {
     return std.json.Stringify.valueAlloc(a, .{ .mode = @tagName(mode), .stopped = stopped, .waiting = waiting }, .{}) catch "{}";
 }
 
-fn riskOf(a: std.mem.Allocator, tool: *const catalog.Tool, args: std.json.Value) policy.Risk {
+fn riskOf(a: std.mem.Allocator, tool: *const catalog.Tool, args: std.json.Value) ?policy.Risk {
     if (!std.mem.eql(u8, tool.name, "app_invoke")) return tool.risk;
     const app = str(args, "app") orelse return .irreversible;
     const intent = str(args, "intent") orelse return .irreversible;
@@ -267,7 +267,11 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
 fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome {
     const session: *Session = @ptrCast(@alignCast(ctx));
     const tool = catalog.find(name) orelse return fail("unknown tool");
-    const risk = riskOf(a, tool, args);
+    const risk = riskOf(a, tool, args) orelse {
+        const o = fail("this application has no such intent");
+        receipt(a, name, args, "refuse", o);
+        return o;
+    };
     c.g_mutex_lock(&lock);
     const verdict = policy.decide(mode, risk, session.tainted, stopped);
     c.g_mutex_unlock(&lock);
@@ -286,7 +290,7 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
         },
         .run => o = run(a, name, args),
     }
-    if (std.mem.eql(u8, name, "app_context") and !o.failed) session.tainted = true;
+    if (!o.failed and (std.mem.eql(u8, name, "app_context") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
     receipt(a, name, args, label, o);
     const tz = a.dupeZ(u8, name) catch return o;
     const lz = a.dupeZ(u8, label) catch return o;
