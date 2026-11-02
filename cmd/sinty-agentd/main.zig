@@ -116,6 +116,12 @@ fn confirm(a: std.mem.Allocator, who: []const u8, tool: []const u8, args: std.js
     return r;
 }
 
+fn confirmOpen() bool {
+    c.g_mutex_lock(&lock);
+    defer c.g_mutex_unlock(&lock);
+    return waiting != 0;
+}
+
 fn str(args: std.json.Value, key: []const u8) ?[:0]const u8 {
     if (args != .object) return null;
     const v = args.object.get(key) orelse return null;
@@ -491,6 +497,8 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
         const place = wl.placeOfWindow(v.integer) orelse return fail("no such window");
         return a11y.tree(a, place.pid, place.x, place.y);
     }
+    if (confirmOpen() and (std.mem.eql(u8, name, "ui_act") or std.mem.eql(u8, name, "pointer") or std.mem.eql(u8, name, "keyboard")))
+        return fail("a confirmation is open: only the user can answer it");
     if (std.mem.eql(u8, name, "ui_act")) {
         if (wl.consentBlocked()) return fail("a consent window is open: only the user can answer it");
         const ref = str(args, "ref") orelse return fail("missing ref");
