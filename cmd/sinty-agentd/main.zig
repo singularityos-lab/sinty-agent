@@ -27,6 +27,7 @@ const XML =
     \\    <method name="SetMode"><arg name="mode" type="s" direction="in"/></method>
     \\    <method name="GetStatus"><arg name="status" type="s" direction="out"/></method>
     \\    <method name="OpenGuestBridge"><arg name="socket" type="s" direction="out"/><arg name="bridge" type="s" direction="out"/></method>
+    \\    <method name="GrantSession"><arg name="token" type="s" direction="out"/></method>
     \\    <method name="Stop"/>
     \\    <method name="Resume"/>
     \\    <method name="Answer"><arg name="id" type="u" direction="in"/><arg name="allow" type="b" direction="in"/></method>
@@ -49,6 +50,12 @@ var waiting: u32 = 0;
 var answer: Answer = .none;
 var guest_open = false;
 var receipts_path: [:0]const u8 = "";
+
+const GRANT_US: i64 = 15 * 60 * 1000 * 1000;
+
+const Grant = struct { token: [32]u8, expires: i64 };
+
+var grants: [16]?Grant = .{null} ** 16;
 
 const Kind = enum { trusted, outsider, guest };
 
@@ -575,6 +582,45 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
     return o;
 }
 
+fn grant() ?[32]u8 {
+    var raw: [16]u8 = undefined;
+    const fd = std.c.open("/dev/urandom", .{}, @as(std.c.mode_t, 0));
+    if (fd < 0) return null;
+    defer _ = std.c.close(fd);
+    if (std.c.read(fd, &raw, raw.len) != raw.len) return null;
+    const token = std.fmt.bytesToHex(raw, .lower);
+    const now = c.g_get_monotonic_time();
+    c.g_mutex_lock(&lock);
+    defer c.g_mutex_unlock(&lock);
+    var slot: usize = 0;
+    var oldest: i64 = std.math.maxInt(i64);
+    for (grants, 0..) |g, i| {
+        const at = if (g) |live| (if (live.expires < now) std.math.minInt(i64) else live.expires) else std.math.minInt(i64);
+        if (at < oldest) {
+            oldest = at;
+            slot = i;
+        }
+    }
+    grants[slot] = .{ .token = token, .expires = now + GRANT_US };
+    return token;
+}
+
+fn redeem(line: []const u8) bool {
+    const prefix = "token ";
+    if (!std.mem.startsWith(u8, line, prefix)) return false;
+    const given = std.mem.trim(u8, line[prefix.len..], " \r");
+    if (given.len != 32) return false;
+    const now = c.g_get_monotonic_time();
+    c.g_mutex_lock(&lock);
+    defer c.g_mutex_unlock(&lock);
+    for (grants) |g| {
+        const live = g orelse continue;
+        if (live.expires < now) continue;
+        if (std.crypto.timing_safe.eql([32]u8, live.token, given[0..32].*)) return true;
+    }
+    return false;
+}
+
 fn serve(fd: c_int, guest: bool) void {
     defer _ = std.c.close(fd);
     const gpa = std.heap.c_allocator;
@@ -589,6 +635,7 @@ fn serve(fd: c_int, guest: bool) void {
     }
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(gpa);
+    var first = !guest;
     var buf: [65536]u8 = undefined;
     while (true) {
         const n = std.c.read(fd, &buf, buf.len);
@@ -596,6 +643,14 @@ fn serve(fd: c_int, guest: bool) void {
         pending.appendSlice(gpa, buf[0..@intCast(n)]) catch return;
         if (pending.items.len > LINE_MAX) return;
         while (std.mem.indexOfScalar(u8, pending.items, '\n')) |end| {
+            if (first) {
+                first = false;
+                if (std.mem.startsWith(u8, pending.items, "token ")) {
+                    if (redeem(pending.items[0..end])) session.kind = .trusted;
+                    pending.replaceRange(gpa, 0, end + 1, &.{}) catch return;
+                    continue;
+                }
+            }
             var arena = std.heap.ArenaAllocator.init(gpa);
             defer arena.deinit();
             const answerLine = mcp.handle(arena.allocator(), pending.items[0..end], .{ .ctx = &session, .call = call }) catch null;
@@ -718,6 +773,19 @@ fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*
         t.detach();
         return;
     }
+    if (std.mem.eql(u8, m, "GrantSession")) {
+        if (!allowed) {
+            c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop shell can do this");
+            return;
+        }
+        const token = grant() orelse {
+            c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.Failed", "no randomness");
+            return;
+        };
+        const z: [33]u8 = token ++ [_]u8{0};
+        c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(s)", &z));
+        return;
+    }
     if (!allowed and (std.mem.eql(u8, m, "Resume") or std.mem.eql(u8, m, "Answer") or std.mem.eql(u8, m, "AllowSession"))) {
         c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop shell can do this");
         return;
@@ -796,6 +864,20 @@ pub fn main() void {
 
     _ = c.g_bus_own_name_on_connection(bus, NAME, c.G_BUS_NAME_OWNER_FLAGS_NONE, onBus, onLost, null, null);
     c.g_main_loop_run(c.g_main_loop_new(null, 0));
+}
+
+test "a granted token makes a session trusted until it expires" {
+    c.g_mutex_init(&lock);
+    const token = grant().?;
+    var line: [38]u8 = undefined;
+    @memcpy(line[0..6], "token ");
+    @memcpy(line[6..], &token);
+    try std.testing.expect(redeem(&line));
+    line[37] ^= 1;
+    try std.testing.expect(!redeem(&line));
+    try std.testing.expect(!redeem("token short"));
+    try std.testing.expect(!redeem("{\"jsonrpc\":\"2.0\"}"));
+    for (&grants) |*g| g.* = null;
 }
 
 test "showArgs prints one readable line per argument" {

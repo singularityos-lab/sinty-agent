@@ -14,7 +14,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn usage() noreturn {
-    fatal("usage: sinty-agent mcp | status | mode plan|ask|auto|autopilot | stop | resume | allow ID | deny ID", .{});
+    fatal("usage: sinty-agent mcp | status | mode plan|ask|auto|autopilot | stop | resume | grant | allow ID | deny ID", .{});
 }
 
 fn pump(from: c_int, to: c_int) void {
@@ -50,6 +50,7 @@ fn bridge() noreturn {
         c.g_usleep(100 * 1000);
     }
     if (fd < 0) fatal("sinty-agentd is not running", .{});
+    if (!sendToken(fd)) fatal("sinty-agentd closed the connection", .{});
     const t = std.Thread.spawn(.{}, pump, .{ fd, 1 }) catch fatal("cannot start", .{});
     t.detach();
     pump(0, fd);
@@ -86,6 +87,11 @@ pub fn main(init: std.process.Init.Minimal) void {
         _ = call("Stop", null);
     } else if (std.mem.eql(u8, cmd, "resume")) {
         _ = call("Resume", null);
+    } else if (std.mem.eql(u8, cmd, "grant")) {
+        const r = call("GrantSession", null);
+        var s: [*c]const u8 = null;
+        c.g_variant_get(r, "(&s)", &s);
+        std.debug.print("{s}\n", .{std.mem.span(s)});
     } else if (std.mem.eql(u8, cmd, "allow-session")) {
         const raw = it.next() orelse usage();
         const id = std.fmt.parseInt(u32, raw, 10) catch usage();
@@ -99,4 +105,18 @@ pub fn main(init: std.process.Init.Minimal) void {
         const allow: c.gboolean = if (std.mem.eql(u8, cmd, "allow")) 1 else 0;
         _ = call("Answer", c.g_variant_new("(ub)", id, allow));
     } else usage();
+}
+
+fn sendToken(fd: c_int) bool {
+    const token = std.mem.span(c.g_getenv("SINTY_AGENT_TOKEN") orelse return true);
+    if (token.len == 0) return true;
+    var line: [80]u8 = undefined;
+    const text = std.fmt.bufPrint(&line, "token {s}\n", .{token}) catch return true;
+    var off: usize = 0;
+    while (off < text.len) {
+        const n = std.c.write(fd, text[off..].ptr, text.len - off);
+        if (n <= 0) return false;
+        off += @intCast(n);
+    }
+    return true;
 }

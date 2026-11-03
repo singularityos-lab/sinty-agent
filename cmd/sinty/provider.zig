@@ -115,6 +115,10 @@ const Mcp = struct {
         while (tries < 50) : (tries += 1) {
             const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_CLOEXEC, 0);
             if (c.connect(fd, @ptrCast(&addr), @sizeOf(c.struct_sockaddr_un)) == 0) {
+                if (!sendToken(fd)) {
+                    _ = std.c.close(fd);
+                    return error.Daemon;
+                }
                 var m: Mcp = .{ .fd = fd, .a = a };
                 _ = try m.call("initialize", "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"sinty\",\"version\":\"0.1\"}}");
                 return m;
@@ -418,7 +422,7 @@ pub fn codex(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]cons
     const args = try std.fmt.allocPrint(a, "mcp_servers.sinty.args=[\"{s}\"]", .{m[1]});
     const full = try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ SYSTEM, prompt });
     var words: std.ArrayList([]const u8) = .empty;
-    try words.appendSlice(a, &.{ "codex", "exec", "--skip-git-repo-check", "-c", server, "-c", args });
+    try words.appendSlice(a, &.{ "codex", "exec", "--skip-git-repo-check", "-c", server, "-c", args, "-c", "mcp_servers.sinty.env_vars=[\"SINTY_AGENT_TOKEN\"]" });
     if (cfg.model.len > 0) try words.appendSlice(a, &.{ "--model", cfg.model });
     try words.append(a, full);
     return spawnCli(a, words.items, !local);
@@ -430,4 +434,18 @@ pub fn run(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const 
     if (std.mem.eql(u8, cfg.provider, "claude-code")) return claudeCode(a, cfg, prompt);
     if (std.mem.eql(u8, cfg.provider, "codex")) return codex(a, cfg, prompt);
     return error.NoProvider;
+}
+
+fn sendToken(fd: c_int) bool {
+    const token = std.mem.span(c.g_getenv("SINTY_AGENT_TOKEN") orelse return true);
+    if (token.len == 0) return true;
+    var line: [80]u8 = undefined;
+    const text = std.fmt.bufPrint(&line, "token {s}\n", .{token}) catch return true;
+    var off: usize = 0;
+    while (off < text.len) {
+        const n = std.c.write(fd, text[off..].ptr, text.len - off);
+        if (n <= 0) return false;
+        off += @intCast(n);
+    }
+    return true;
 }
