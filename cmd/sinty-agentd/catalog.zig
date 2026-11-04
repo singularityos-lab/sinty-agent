@@ -50,7 +50,7 @@ pub const TOOLS = [_]Tool{
     },
     .{
         .name = "mail_compose",
-        .description = "Open a new message in the default mail application, with the fields filled. The user sends it.",
+        .description = "Open a new message in the default mail application, with the fields filled. The user sends it. Use it only when the mail application has no intent that prepares a message.",
         .schema = "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}}}",
         .risk = .undoable,
     },

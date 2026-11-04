@@ -34,6 +34,7 @@ const XML =
     \\    <method name="AllowSession"><arg name="id" type="u" direction="in"/></method>
     \\    <signal name="ConfirmRequested"><arg name="id" type="u"/><arg name="text" type="s"/></signal>
     \\    <signal name="ActionDone"><arg name="tool" type="s"/><arg name="outcome" type="s"/></signal>
+    \\    <signal name="IntentDone"><arg name="app" type="s"/><arg name="intent" type="s"/><arg name="args" type="s"/><arg name="result" type="s"/></signal>
     \\  </interface>
     \\</node>
 ;
@@ -53,7 +54,13 @@ var receipts_path: [:0]const u8 = "";
 
 const GRANT_US: i64 = 15 * 60 * 1000 * 1000;
 
-const Grant = struct { token: [32]u8, expires: i64 };
+const OWNER_MAX = 255;
+
+const Grant = struct {
+    token: [32]u8,
+    expires: i64,
+    owner: [OWNER_MAX:0]u8 = .{0} ** OWNER_MAX,
+};
 
 var grants: [16]?Grant = .{null} ** 16;
 
@@ -63,6 +70,7 @@ const Session = struct {
     tainted: bool = false,
     kind: Kind = .outsider,
     peer: []const u8 = "unknown",
+    owner: [OWNER_MAX:0]u8 = .{0} ** OWNER_MAX,
 };
 
 const HARMLESS = [_][]const u8{ "agent_status", "apps_list", "app_intents" };
@@ -637,6 +645,10 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
         .run => o = run(a, name, args),
     }
     if (!o.failed and (std.mem.eql(u8, name, "app_context") or std.mem.eql(u8, name, "conversations") or std.mem.eql(u8, name, "screen_capture") or std.mem.eql(u8, name, "windows_list") or std.mem.eql(u8, name, "ui_tree") or std.mem.eql(u8, name, "shell_run") or std.mem.eql(u8, name, "dbus_call") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
+    if (!o.failed and std.mem.eql(u8, name, "app_invoke")) {
+        intentDone(a, session, args, o.text);
+        o.text = withoutPrivate(a, o.text);
+    }
     receipt(a, name, args, label, o);
     const tz = a.dupeZ(u8, name) catch return o;
     const lz = a.dupeZ(u8, label) catch return o;
@@ -644,7 +656,25 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
     return o;
 }
 
-fn grant() ?[32]u8 {
+pub fn withoutPrivate(a: std.mem.Allocator, text: []const u8) []const u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return text;
+    if (parsed.value != .object or !parsed.value.object.contains("private")) return text;
+    _ = parsed.value.object.orderedRemove("private");
+    return std.json.Stringify.valueAlloc(a, parsed.value, .{}) catch "{}";
+}
+
+fn intentDone(a: std.mem.Allocator, session: *const Session, args: std.json.Value, result: []const u8) void {
+    if (session.owner[0] == 0) return;
+    const app = str(args, "app") orelse return;
+    const intent = str(args, "intent") orelse return;
+    const payload: std.json.Value = if (args.object.get("args")) |v| v else .{ .object = .empty };
+    const raw = std.json.Stringify.valueAlloc(a, payload, .{}) catch return;
+    const rz = a.dupeZ(u8, raw) catch return;
+    const oz = a.dupeZ(u8, result) catch return;
+    _ = c.g_dbus_connection_emit_signal(bus, &session.owner, PATH, IFACE, "IntentDone", c.g_variant_new("(ssss)", app.ptr, intent.ptr, rz.ptr, oz.ptr), null);
+}
+
+fn grant(owner: []const u8) ?[32]u8 {
     var raw: [16]u8 = undefined;
     const fd = std.c.open("/dev/urandom", .{}, @as(std.c.mode_t, 0));
     if (fd < 0) return null;
@@ -664,23 +694,25 @@ fn grant() ?[32]u8 {
         }
     }
     grants[slot] = .{ .token = token, .expires = now + GRANT_US };
+    const n = @min(owner.len, OWNER_MAX);
+    @memcpy(grants[slot].?.owner[0..n], owner[0..n]);
     return token;
 }
 
-fn redeem(line: []const u8) bool {
+fn redeem(line: []const u8) ?Grant {
     const prefix = "token ";
-    if (!std.mem.startsWith(u8, line, prefix)) return false;
+    if (!std.mem.startsWith(u8, line, prefix)) return null;
     const given = std.mem.trim(u8, line[prefix.len..], " \r");
-    if (given.len != 32) return false;
+    if (given.len != 32) return null;
     const now = c.g_get_monotonic_time();
     c.g_mutex_lock(&lock);
     defer c.g_mutex_unlock(&lock);
     for (grants) |g| {
         const live = g orelse continue;
         if (live.expires < now) continue;
-        if (std.crypto.timing_safe.eql([32]u8, live.token, given[0..32].*)) return true;
+        if (std.crypto.timing_safe.eql([32]u8, live.token, given[0..32].*)) return live;
     }
-    return false;
+    return null;
 }
 
 fn serve(fd: c_int, guest: bool) void {
@@ -708,7 +740,10 @@ fn serve(fd: c_int, guest: bool) void {
             if (first) {
                 first = false;
                 if (std.mem.startsWith(u8, pending.items, "token ")) {
-                    if (redeem(pending.items[0..end])) session.kind = .trusted;
+                    if (redeem(pending.items[0..end])) |g| {
+                        session.kind = .trusted;
+                        session.owner = g.owner;
+                    }
                     pending.replaceRange(gpa, 0, end + 1, &.{}) catch return;
                     continue;
                 }
@@ -840,7 +875,7 @@ fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*
             c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop shell can do this");
             return;
         }
-        const token = grant() orelse {
+        const token = grant(std.mem.span(sender)) orelse {
             c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.Failed", "no randomness");
             return;
         };
@@ -928,17 +963,18 @@ pub fn main() void {
     c.g_main_loop_run(c.g_main_loop_new(null, 0));
 }
 
-test "a granted token makes a session trusted until it expires" {
+test "a granted token makes a session trusted and remembers who asked for it" {
     c.g_mutex_init(&lock);
-    const token = grant().?;
+    const token = grant(":1.42").?;
     var line: [38]u8 = undefined;
     @memcpy(line[0..6], "token ");
     @memcpy(line[6..], &token);
-    try std.testing.expect(redeem(&line));
+    const live = redeem(&line) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings(":1.42", std.mem.sliceTo(&live.owner, 0));
     line[37] ^= 1;
-    try std.testing.expect(!redeem(&line));
-    try std.testing.expect(!redeem("token short"));
-    try std.testing.expect(!redeem("{\"jsonrpc\":\"2.0\"}"));
+    try std.testing.expect(redeem(&line) == null);
+    try std.testing.expect(redeem("token short") == null);
+    try std.testing.expect(redeem("{\"jsonrpc\":\"2.0\"}") == null);
     for (&grants) |*g| g.* = null;
 }
 
@@ -949,4 +985,15 @@ test "showArgs prints one readable line per argument" {
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"app\":\"dev.sinty.files\",\"n\":2}", .{});
     try std.testing.expectEqualStrings("\napp: dev.sinty.files\nn: 2", showArgs(a, parsed));
     try std.testing.expectEqualStrings("", showArgs(a, .null));
+}
+
+test "private intent fields reach the card but not the model" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = withoutPrivate(a, "{\"private\":{\"token\":\"abc\"},\"to\":\"x@y\"}");
+    try std.testing.expect(std.mem.indexOf(u8, out, "abc") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "x@y") != null);
+    try std.testing.expectEqualStrings("[1,2]", withoutPrivate(a, "[1,2]"));
+    try std.testing.expectEqualStrings("not json", withoutPrivate(a, "not json"));
 }
