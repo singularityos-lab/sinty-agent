@@ -56,8 +56,8 @@ pub const TOOLS = [_]Tool{
     },
     .{
         .name = "open_uri",
-        .description = "Open a web address or a file with its default application.",
-        .schema = "{\"type\":\"object\",\"properties\":{\"uri\":{\"type\":\"string\"}},\"required\":[\"uri\"]}",
+        .description = "Open a web address or a file. Without app it opens in the default application; to open it in a specific one, such as a browser the user named, pass that application's id from apps_list.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"uri\":{\"type\":\"string\"},\"app\":{\"type\":\"string\"}},\"required\":[\"uri\"]}",
         .risk = .undoable,
     },
     .{
@@ -118,6 +118,12 @@ pub const TOOLS = [_]Tool{
         .name = "settings_schemas",
         .description = "List the settings schemas installed on the system. Optional query filters by text, such as dev.sinty.",
         .schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}",
+        .risk = .read,
+    },
+    .{
+        .name = "conversations",
+        .description = "Find earlier Sinty AI conversations. Without id, list the latest ones, newest first, optionally only those mentioning query; with id, read that conversation.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}}}",
         .risk = .read,
     },
     .{

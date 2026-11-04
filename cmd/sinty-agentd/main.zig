@@ -223,6 +223,59 @@ fn appsList(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     return .{ .text = out.items };
 }
 
+const Turn = struct { time: i64 = 0, user: []const u8 = "", answer: []const u8 = "" };
+const Past = struct { id: []const u8, time: i64, first: []const u8, turns: usize };
+
+fn conversationId(id: []const u8) bool {
+    if (id.len == 0 or id.len > 64) return false;
+    for (id) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_') return false;
+    }
+    return true;
+}
+
+fn mentions(turns: []const Turn, query: []const u8) bool {
+    for (turns) |t| {
+        if (std.ascii.indexOfIgnoreCase(t.user, query) != null or std.ascii.indexOfIgnoreCase(t.answer, query) != null) return true;
+    }
+    return false;
+}
+
+fn newerFirst(_: void, x: Past, y: Past) bool {
+    return x.time > y.time;
+}
+
+fn conversations(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const dir = std.fmt.allocPrintSentinel(a, "{s}/sinty-agent/conversations", .{std.mem.span(c.g_get_user_state_dir())}, 0) catch return fail("out of memory");
+    if (str(args, "id")) |id| {
+        if (!conversationId(id)) return fail("no such conversation");
+        const p = std.fmt.allocPrintSentinel(a, "{s}/{s}.json", .{ dir, id }, 0) catch return fail("out of memory");
+        var data: [*c]u8 = null;
+        if (c.g_file_get_contents(p.ptr, &data, null, null) == 0) return fail("no such conversation");
+        return .{ .text = std.mem.span(data) };
+    }
+    const query = str(args, "query");
+    var found: std.ArrayList(Past) = .empty;
+    if (c.g_dir_open(dir.ptr, 0, null)) |h| {
+        defer c.g_dir_close(h);
+        while (c.g_dir_read_name(h)) |raw| {
+            const name = std.mem.span(raw);
+            if (!std.mem.endsWith(u8, name, ".json")) continue;
+            const p = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, name }, 0) catch continue;
+            var data: [*c]u8 = null;
+            if (c.g_file_get_contents(p.ptr, &data, null, null) == 0) continue;
+            const v = std.json.parseFromSliceLeaky(struct { turns: []Turn }, a, std.mem.span(data), .{ .ignore_unknown_fields = true }) catch continue;
+            if (v.turns.len == 0) continue;
+            if (query) |q| if (!mentions(v.turns, q)) continue;
+            const first = v.turns[0].user;
+            found.append(a, .{ .id = name[0 .. name.len - 5], .time = v.turns[v.turns.len - 1].time, .first = first[0..@min(first.len, 160)], .turns = v.turns.len }) catch continue;
+        }
+    }
+    std.mem.sort(Past, found.items, {}, newerFirst);
+    const text = std.json.Stringify.valueAlloc(a, found.items[0..@min(found.items.len, 20)], .{}) catch return fail("out of memory");
+    return .{ .text = text };
+}
+
 fn appOpen(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     const app = str(args, "app") orelse return fail("missing app");
     const file = std.fmt.allocPrintSentinel(a, "{s}.desktop", .{app}, 0) catch return fail("out of memory");
@@ -308,9 +361,17 @@ fn mailCompose(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     return launchUri(uri.ptr);
 }
 
-fn openUri(args: std.json.Value) mcp.Outcome {
+fn openUri(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     const uri = str(args, "uri") orelse return fail("missing uri");
-    return launchUri(uri.ptr);
+    const app = str(args, "app") orelse return launchUri(uri.ptr);
+    const file = std.fmt.allocPrintSentinel(a, "{s}.desktop", .{app}, 0) catch return fail("out of memory");
+    const info = c.g_desktop_app_info_new(file.ptr) orelse return fail("application not found");
+    defer c.g_object_unref(info);
+    if (c.g_app_info_supports_uris(@ptrCast(info)) == 0) return fail("this application does not open addresses");
+    var uris = c.GList{ .data = @ptrCast(@constCast(uri.ptr)), .next = null, .prev = null };
+    var err: [*c]c.GError = null;
+    if (c.g_app_info_launch_uris(@ptrCast(info), &uris, null, &err) == 0) return gerror(a, &err);
+    return .{ .text = "opened" };
 }
 
 fn notify(args: std.json.Value) mcp.Outcome {
@@ -507,7 +568,8 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "app_action")) return appAction(a, args);
     if (std.mem.eql(u8, name, "agent_status")) return .{ .text = status(a) };
     if (std.mem.eql(u8, name, "mail_compose")) return mailCompose(a, args);
-    if (std.mem.eql(u8, name, "open_uri")) return openUri(args);
+    if (std.mem.eql(u8, name, "open_uri")) return openUri(a, args);
+    if (std.mem.eql(u8, name, "conversations")) return conversations(a, args);
     if (std.mem.eql(u8, name, "notify")) return notify(args);
     if (std.mem.eql(u8, name, "ui_tree")) {
         const v = args.object.get("window") orelse return fail("missing window");
@@ -574,7 +636,7 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
         },
         .run => o = run(a, name, args),
     }
-    if (!o.failed and (std.mem.eql(u8, name, "app_context") or std.mem.eql(u8, name, "screen_capture") or std.mem.eql(u8, name, "windows_list") or std.mem.eql(u8, name, "ui_tree") or std.mem.eql(u8, name, "shell_run") or std.mem.eql(u8, name, "dbus_call") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
+    if (!o.failed and (std.mem.eql(u8, name, "app_context") or std.mem.eql(u8, name, "conversations") or std.mem.eql(u8, name, "screen_capture") or std.mem.eql(u8, name, "windows_list") or std.mem.eql(u8, name, "ui_tree") or std.mem.eql(u8, name, "shell_run") or std.mem.eql(u8, name, "dbus_call") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
     receipt(a, name, args, label, o);
     const tz = a.dupeZ(u8, name) catch return o;
     const lz = a.dupeZ(u8, label) catch return o;
@@ -635,7 +697,7 @@ fn serve(fd: c_int, guest: bool) void {
     }
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(gpa);
-    var first = !guest;
+    var first = true;
     var buf: [65536]u8 = undefined;
     while (true) {
         const n = std.c.read(fd, &buf, buf.len);
