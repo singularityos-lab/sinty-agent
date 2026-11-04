@@ -1,5 +1,6 @@
 const std = @import("std");
 const provider = @import("provider.zig");
+const memory = @import("memory.zig");
 const c = provider.c;
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
@@ -8,7 +9,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn usage() noreturn {
-    fatal("usage: sinty ask [--provider NAME] [--model NAME] [--endpoint URL] TEXT\n       sinty key PROVIDER (reads the key from standard input)\nproviders: {s}", .{"claude-code codex claude-api ollama"});
+    fatal("usage: sinty ask [--provider NAME] [--model NAME] [--endpoint URL] [--conversation ID] TEXT\n       sinty key PROVIDER (reads the key from standard input)\nproviders: {s}", .{"claude-code codex claude-api ollama"});
 }
 
 fn storeKey(p: []const u8) void {
@@ -31,6 +32,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     if (!std.mem.eql(u8, cmd, "ask")) usage();
     var cfg = provider.Config.load(a);
     var words: std.ArrayList(u8) = .empty;
+    var conversation: []const u8 = "";
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--provider")) {
             cfg.provider = it.next() orelse usage();
@@ -38,13 +40,19 @@ pub fn main(init: std.process.Init.Minimal) void {
             cfg.model = it.next() orelse usage();
         } else if (std.mem.eql(u8, arg, "--endpoint")) {
             cfg.endpoint = it.next() orelse usage();
+        } else if (std.mem.eql(u8, arg, "--conversation")) {
+            conversation = it.next() orelse usage();
+            if (!memory.valid(conversation)) usage();
         } else {
             if (words.items.len > 0) words.append(a, ' ') catch fatal("out of memory", .{});
             words.appendSlice(a, arg) catch fatal("out of memory", .{});
         }
     }
     if (words.items.len == 0) usage();
-    const text = provider.run(a, cfg, words.items) catch |e| fatal("{s}", .{provider.describe(e)});
+    const turns = if (conversation.len > 0) memory.load(a, conversation) else &.{};
+    const full = memory.prompt(a, turns, provider.windows(a), words.items) catch fatal("out of memory", .{});
+    const text = provider.run(a, cfg, full) catch |e| fatal("{s}", .{provider.describe(e)});
+    if (conversation.len > 0) memory.save(a, conversation, turns, words.items, text);
     if (text.len > 0) {
         _ = std.c.write(1, text.ptr, text.len);
         _ = std.c.write(1, "\n", 1);

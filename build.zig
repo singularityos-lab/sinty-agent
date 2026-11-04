@@ -73,4 +73,10 @@ pub fn build(b: *std.Build) void {
         const mod = b.createModule(.{ .root_source_file = b.path(root), .target = target, .optimize = optimize });
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
+    const memory = b.createModule(.{ .root_source_file = b.path("cmd/sinty/memory.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    memory.addIncludePath(b.path("cmd/sinty"));
+    memory.linkSystemLibrary("gio-2.0", .{});
+    memory.linkSystemLibrary("libsoup-3.0", .{});
+    memory.linkSystemLibrary("libsecret-1", .{});
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory })).step);
 }
