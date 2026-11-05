@@ -51,6 +51,7 @@ var mode: policy.Mode = .ask;
 var stopped = false;
 var next_confirm: u32 = 1;
 var waiting: u32 = 0;
+var waiting_risk: policy.Risk = .read;
 var answer: Answer = .none;
 var guest_open = false;
 var receipts_path: [:0]const u8 = "";
@@ -130,13 +131,14 @@ fn showArgs(a: std.mem.Allocator, args: std.json.Value) []const u8 {
     return out.items;
 }
 
-fn confirm(a: std.mem.Allocator, who: []const u8, tool: []const u8, args: std.json.Value) Answer {
+fn confirm(a: std.mem.Allocator, who: []const u8, tool: []const u8, args: std.json.Value, risk: policy.Risk) Answer {
     c.g_mutex_lock(&lock);
     defer c.g_mutex_unlock(&lock);
     while (waiting != 0) c.g_cond_wait(&changed, &lock);
     const id = next_confirm;
     next_confirm += 1;
     waiting = id;
+    waiting_risk = risk;
     answer = .none;
     const text = std.fmt.allocPrintSentinel(a, "{s}: {s}{s}", .{ who, tool, showArgs(a, args) }, 0) catch "";
     emit("ConfirmRequested", c.g_variant_new("(us)", id, text.ptr).?);
@@ -366,7 +368,7 @@ fn status(a: std.mem.Allocator) []const u8 {
     c.g_mutex_lock(&lock);
     defer c.g_mutex_unlock(&lock);
     const device: []const u8 = if (remote_count > 0) std.mem.sliceTo(&remote_name, 0) else "";
-    return std.json.Stringify.valueAlloc(a, .{ .mode = @tagName(mode), .stopped = stopped, .waiting = waiting, .remote = device }, .{}) catch "{}";
+    return std.json.Stringify.valueAlloc(a, .{ .mode = @tagName(mode), .stopped = stopped, .waiting = waiting, .risk = if (waiting != 0) @tagName(waiting_risk) else "", .remote = device }, .{}) catch "{}";
 }
 
 fn gerror(a: std.mem.Allocator, err: *[*c]c.GError) mcp.Outcome {
@@ -651,7 +653,7 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
     switch (verdict) {
         .refuse => o = fail("refused by the current mode"),
         .confirm => {
-            const r = confirm(a, session.peer, name, args);
+            const r = confirm(a, session.peer, name, args, risk);
             if (r == .session and session.kind == .outsider) session.kind = .trusted;
             if (r == .allow or r == .session) {
                 label = "confirmed";
@@ -886,7 +888,7 @@ fn callerPid(sender: [*c]const u8) i32 {
 
 fn guestAsk(inv: ?*c.GDBusMethodInvocation) void {
     const who = "a program that wants to open the dsh bridge";
-    const r = confirm(std.heap.c_allocator, who, "open_guest_bridge", .null);
+    const r = confirm(std.heap.c_allocator, who, "open_guest_bridge", .null, .irreversible);
     if (r == .allow or r == .session) {
         openGuestBridge(inv);
     } else {
@@ -941,7 +943,7 @@ fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*
         c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(s)", &z));
         return;
     }
-    const steering = std.mem.eql(u8, m, "Resume") or std.mem.eql(u8, m, "Answer") or std.mem.eql(u8, m, "AllowSession");
+    const steering = std.mem.eql(u8, m, "Resume") or std.mem.eql(u8, m, "Answer") or std.mem.eql(u8, m, "AllowSession") or std.mem.eql(u8, m, "SetMode");
     const remote = !allowed and (steering or std.mem.eql(u8, m, "RemoteGrant")) and callerRemote(scratch.allocator(), sender);
     if (std.mem.eql(u8, m, "RemoteGrant")) {
         var device: [*c]const u8 = null;
@@ -963,7 +965,7 @@ fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*
         c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(s)", &z));
         return;
     }
-    if (!allowed and !remote and steering) {
+    if (!allowed and !remote and steering and !std.mem.eql(u8, m, "SetMode")) {
         c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop shell can do this");
         return;
     }
@@ -976,7 +978,7 @@ fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*
             c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.InvalidArgs", "unknown mode");
             return;
         };
-        if (policy.rank(wanted) > policy.rank(mode) and !allowed) {
+        if (policy.rank(wanted) > policy.rank(mode) and !allowed and !remote) {
             c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop shell can raise the mode");
             return;
         }
