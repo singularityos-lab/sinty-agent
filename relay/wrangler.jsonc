@@ -1,0 +1,31 @@
+{
+  "name": "sinty-ai-relay",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "relay.sinty.dev",
+      "custom_domain": true
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOMS",
+        "class_name": "Room"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Room"]
+    }
+  ],
+  "vars": {
+    "APNS_TOPIC": "dev.sinty.ai",
+    "APNS_SANDBOX": "0"
+  }
+}
