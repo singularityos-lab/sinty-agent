@@ -328,7 +328,17 @@ fn appInvoke(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     const payload: std.json.Value = if (args.object.get("args")) |v| v else .{ .object = .empty };
     const raw = std.json.Stringify.valueAlloc(a, payload, .{}) catch return fail("out of memory");
     const shown = a.dupeZ(u8, raw) catch return fail("out of memory");
-    return appCall(a, app, APP_IFACE, "Invoke", c.g_variant_new("(ss)", intent.ptr, shown.ptr), "(s)");
+    const o = appCall(a, app, APP_IFACE, "Invoke", c.g_variant_new("(ss)", intent.ptr, shown.ptr), "(s)");
+    if (o.failed or !unverified(a, o.text)) return o;
+    const text = std.fmt.allocPrint(a, "NOT DONE: the application read the result back and the change is not there. Do not tell the user it worked. {s}", .{o.text}) catch return fail("out of memory");
+    return .{ .text = text, .failed = true };
+}
+
+fn unverified(a: std.mem.Allocator, text: []const u8) bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return false;
+    if (parsed.value != .object) return false;
+    const v = parsed.value.object.get("verified") orelse return false;
+    return v == .bool and !v.bool;
 }
 
 fn appAction(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
