@@ -5,7 +5,7 @@ pub const c = @cImport({
 });
 
 const json = std.json;
-const MAX_TURNS = 40;
+const MAX_TURNS = 120;
 const SYSTEM =
     \\You control this computer through tools. Act, do not describe what the user could do.
     \\Start from apps_list and app_intents when you do not know the id of an application or the name of an intent.
