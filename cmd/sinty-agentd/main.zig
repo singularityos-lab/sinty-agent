@@ -36,6 +36,7 @@ const XML =
     \\    <method name="AllowSession"><arg name="id" type="u" direction="in"/></method>
     \\    <signal name="ConfirmRequested"><arg name="id" type="u"/><arg name="text" type="s"/></signal>
     \\    <signal name="ActionDone"><arg name="tool" type="s"/><arg name="outcome" type="s"/></signal>
+    \\    <signal name="ConfirmClosed"><arg name="id" type="u"/></signal>
     \\    <signal name="RemoteChanged"><arg name="device" type="s"/></signal>
     \\    <signal name="IntentDone"><arg name="app" type="s"/><arg name="intent" type="s"/><arg name="args" type="s"/><arg name="result" type="s"/></signal>
     \\  </interface>
@@ -148,6 +149,7 @@ fn confirm(a: std.mem.Allocator, who: []const u8, tool: []const u8, args: std.js
     }
     const r: Answer = if (stopped or answer == .none) .deny else answer;
     waiting = 0;
+    emit("ConfirmClosed", c.g_variant_new("(u)", id).?);
     c.g_cond_broadcast(&changed);
     return r;
 }

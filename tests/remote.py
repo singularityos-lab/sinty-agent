@@ -21,6 +21,8 @@ def status():
 remotes = []
 asks = []
 bus.signal_subscribe("dev.sinty.Agent", "dev.sinty.Agent1", "RemoteChanged", None, None, Gio.DBusSignalFlags.NONE, lambda *a: remotes.append(a[5].unpack()[0]), None)
+closed = []
+bus.signal_subscribe("dev.sinty.Agent", "dev.sinty.Agent1", "ConfirmClosed", None, None, Gio.DBusSignalFlags.NONE, lambda *a: closed.append(a[5].unpack()[0]), None)
 bus.signal_subscribe("dev.sinty.Agent", "dev.sinty.Agent1", "ConfirmRequested", None, None, Gio.DBusSignalFlags.NONE, lambda *a: asks.append(a[5].unpack()), None)
 ctx = GLib.MainContext.default()
 def pump(cond):
@@ -54,6 +56,8 @@ check("the status tells the risk of the open question", status().get("risk") == 
 if asks:
     check("the device service can answer", dbus("Answer", GLib.Variant("(ub)", (asks[0][0], False))) == ())
 t.join(timeout=20)
+pump(lambda: closed)
+check("the desktop learns the question is closed", asks and closed == [asks[0][0]], closed)
 check("the phone denial reaches the tool", "x" in r and r["x"][0] and "did not allow" in r["x"][1], r)
 check("the device service can stop", dbus("Stop") == ())
 check("the device service can resume", dbus("Resume") == ())
