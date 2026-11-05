@@ -27,6 +27,7 @@ const XML =
     \\    <method name="SetMode"><arg name="mode" type="s" direction="in"/></method>
     \\    <method name="GetStatus"><arg name="status" type="s" direction="out"/></method>
     \\    <method name="OpenGuestBridge"><arg name="socket" type="s" direction="out"/><arg name="bridge" type="s" direction="out"/></method>
+    \\    <method name="OpenGrantedBridge"><arg name="token" type="s" direction="in"/><arg name="socket" type="s" direction="out"/><arg name="bridge" type="s" direction="out"/></method>
     \\    <method name="GrantSession"><arg name="token" type="s" direction="out"/></method>
     \\    <method name="Stop"/>
     \\    <method name="Resume"/>
@@ -868,6 +869,17 @@ fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*
     var scratch = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer scratch.deinit();
     const allowed = callerTrusted(scratch.allocator(), sender);
+    if (std.mem.eql(u8, m, "OpenGrantedBridge")) {
+        var given: [*c]const u8 = null;
+        c.g_variant_get(params, "(&s)", &given);
+        const line = std.fmt.allocPrint(scratch.allocator(), "token {s}", .{std.mem.span(given)}) catch "";
+        if (allowed or redeem(line) != null) {
+            openGuestBridge(inv);
+        } else {
+            c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "the token is not valid");
+        }
+        return;
+    }
     if (std.mem.eql(u8, m, "OpenGuestBridge")) {
         if (allowed) {
             openGuestBridge(inv);

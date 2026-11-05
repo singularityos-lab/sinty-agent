@@ -394,7 +394,11 @@ fn quote(a: std.mem.Allocator, s: []const u8) Error![]const u8 {
 fn guestBridge(a: std.mem.Allocator) Error![2][]const u8 {
     startDaemon();
     const bus = c.g_bus_get_sync(c.G_BUS_TYPE_SESSION, null, null) orelse return error.Daemon;
-    const r = c.g_dbus_connection_call_sync(bus, "dev.sinty.Agent", "/dev/sinty/Agent", "dev.sinty.Agent1", "OpenGuestBridge", null, c.g_variant_type_new("(ss)"), c.G_DBUS_CALL_FLAGS_NONE, 5000, null, null);
+    const token = grantedToken();
+    const r = if (token.len > 0)
+        c.g_dbus_connection_call_sync(bus, "dev.sinty.Agent", "/dev/sinty/Agent", "dev.sinty.Agent1", "OpenGrantedBridge", c.g_variant_new("(s)", (try z(a, token)).ptr), c.g_variant_type_new("(ss)"), c.G_DBUS_CALL_FLAGS_NONE, 5000, null, null)
+    else
+        c.g_dbus_connection_call_sync(bus, "dev.sinty.Agent", "/dev/sinty/Agent", "dev.sinty.Agent1", "OpenGuestBridge", null, c.g_variant_type_new("(ss)"), c.G_DBUS_CALL_FLAGS_NONE, 125000, null, null);
     if (r == null) return error.Daemon;
     var sock: [*c]const u8 = null;
     var bridge: [*c]const u8 = null;
