@@ -29,12 +29,14 @@ const XML =
     \\    <method name="OpenGuestBridge"><arg name="socket" type="s" direction="out"/><arg name="bridge" type="s" direction="out"/></method>
     \\    <method name="OpenGrantedBridge"><arg name="token" type="s" direction="in"/><arg name="socket" type="s" direction="out"/><arg name="bridge" type="s" direction="out"/></method>
     \\    <method name="GrantSession"><arg name="token" type="s" direction="out"/></method>
+    \\    <method name="RemoteGrant"><arg name="device" type="s" direction="in"/><arg name="token" type="s" direction="out"/></method>
     \\    <method name="Stop"/>
     \\    <method name="Resume"/>
     \\    <method name="Answer"><arg name="id" type="u" direction="in"/><arg name="allow" type="b" direction="in"/></method>
     \\    <method name="AllowSession"><arg name="id" type="u" direction="in"/></method>
     \\    <signal name="ConfirmRequested"><arg name="id" type="u"/><arg name="text" type="s"/></signal>
     \\    <signal name="ActionDone"><arg name="tool" type="s"/><arg name="outcome" type="s"/></signal>
+    \\    <signal name="RemoteChanged"><arg name="device" type="s"/></signal>
     \\    <signal name="IntentDone"><arg name="app" type="s"/><arg name="intent" type="s"/><arg name="args" type="s"/><arg name="result" type="s"/></signal>
     \\  </interface>
     \\</node>
@@ -61,6 +63,7 @@ const Grant = struct {
     token: [32]u8,
     expires: i64,
     owner: [OWNER_MAX:0]u8 = .{0} ** OWNER_MAX,
+    device: [OWNER_MAX:0]u8 = .{0} ** OWNER_MAX,
 };
 
 var grants: [16]?Grant = .{null} ** 16;
@@ -72,7 +75,11 @@ const Session = struct {
     kind: Kind = .outsider,
     peer: []const u8 = "unknown",
     owner: [OWNER_MAX:0]u8 = .{0} ** OWNER_MAX,
+    device: [OWNER_MAX:0]u8 = .{0} ** OWNER_MAX,
 };
+
+var remote_count: u32 = 0;
+var remote_name: [OWNER_MAX:0]u8 = .{0} ** OWNER_MAX;
 
 const HARMLESS = [_][]const u8{ "agent_status", "apps_list", "app_intents" };
 
@@ -358,7 +365,8 @@ fn appAction(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
 fn status(a: std.mem.Allocator) []const u8 {
     c.g_mutex_lock(&lock);
     defer c.g_mutex_unlock(&lock);
-    return std.json.Stringify.valueAlloc(a, .{ .mode = @tagName(mode), .stopped = stopped, .waiting = waiting }, .{}) catch "{}";
+    const device: []const u8 = if (remote_count > 0) std.mem.sliceTo(&remote_name, 0) else "";
+    return std.json.Stringify.valueAlloc(a, .{ .mode = @tagName(mode), .stopped = stopped, .waiting = waiting, .remote = device }, .{}) catch "{}";
 }
 
 fn gerror(a: std.mem.Allocator, err: *[*c]c.GError) mcp.Outcome {
@@ -685,7 +693,7 @@ fn intentDone(a: std.mem.Allocator, session: *const Session, args: std.json.Valu
     _ = c.g_dbus_connection_emit_signal(bus, &session.owner, PATH, IFACE, "IntentDone", c.g_variant_new("(ssss)", app.ptr, intent.ptr, rz.ptr, oz.ptr), null);
 }
 
-fn grant(owner: []const u8) ?[32]u8 {
+fn grant(owner: []const u8, device: []const u8) ?[32]u8 {
     var raw: [16]u8 = undefined;
     const fd = std.c.open("/dev/urandom", .{}, @as(std.c.mode_t, 0));
     if (fd < 0) return null;
@@ -707,6 +715,8 @@ fn grant(owner: []const u8) ?[32]u8 {
     grants[slot] = .{ .token = token, .expires = now + GRANT_US };
     const n = @min(owner.len, OWNER_MAX);
     @memcpy(grants[slot].?.owner[0..n], owner[0..n]);
+    const d = @min(device.len, OWNER_MAX);
+    @memcpy(grants[slot].?.device[0..d], device[0..d]);
     return token;
 }
 
@@ -726,6 +736,22 @@ fn redeem(line: []const u8) ?Grant {
     return null;
 }
 
+fn remoteBegin(device: *const [OWNER_MAX:0]u8) void {
+    c.g_mutex_lock(&lock);
+    remote_count += 1;
+    remote_name = device.*;
+    c.g_mutex_unlock(&lock);
+    emit("RemoteChanged", c.g_variant_new("(s)", device).?);
+}
+
+fn remoteEnd() void {
+    c.g_mutex_lock(&lock);
+    remote_count -|= 1;
+    const left = remote_count;
+    c.g_mutex_unlock(&lock);
+    if (left == 0) emit("RemoteChanged", c.g_variant_new("(s)", "").?);
+}
+
 fn serve(fd: c_int, guest: bool) void {
     defer _ = std.c.close(fd);
     const gpa = std.heap.c_allocator;
@@ -740,6 +766,7 @@ fn serve(fd: c_int, guest: bool) void {
     }
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(gpa);
+    defer if (session.device[0] != 0) remoteEnd();
     var first = true;
     var buf: [65536]u8 = undefined;
     while (true) {
@@ -754,6 +781,11 @@ fn serve(fd: c_int, guest: bool) void {
                     if (redeem(pending.items[0..end])) |g| {
                         session.kind = .trusted;
                         session.owner = g.owner;
+                        session.device = g.device;
+                        if (g.device[0] != 0) {
+                            session.peer = std.mem.sliceTo(&session.device, 0);
+                            remoteBegin(&session.device);
+                        }
                     }
                     pending.replaceRange(gpa, 0, end + 1, &.{}) catch return;
                     continue;
@@ -840,6 +872,10 @@ fn callerTrusted(a: std.mem.Allocator, sender: [*c]const u8) bool {
     return trust.trusted(a, callerPid(sender));
 }
 
+fn callerRemote(a: std.mem.Allocator, sender: [*c]const u8) bool {
+    return trust.remote(a, callerPid(sender));
+}
+
 fn callerPid(sender: [*c]const u8) i32 {
     const r = c.g_dbus_connection_call_sync(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetConnectionUnixProcessID", c.g_variant_new("(s)", sender), vt("(u)"), c.G_DBUS_CALL_FLAGS_NONE, 5000, null, null) orelse return 0;
     defer c.g_variant_unref(r);
@@ -897,7 +933,7 @@ fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*
             c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop shell can do this");
             return;
         }
-        const token = grant(std.mem.span(sender)) orelse {
+        const token = grant(std.mem.span(sender), "") orelse {
             c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.Failed", "no randomness");
             return;
         };
@@ -905,7 +941,29 @@ fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*
         c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(s)", &z));
         return;
     }
-    if (!allowed and (std.mem.eql(u8, m, "Resume") or std.mem.eql(u8, m, "Answer") or std.mem.eql(u8, m, "AllowSession"))) {
+    const steering = std.mem.eql(u8, m, "Resume") or std.mem.eql(u8, m, "Answer") or std.mem.eql(u8, m, "AllowSession");
+    const remote = !allowed and (steering or std.mem.eql(u8, m, "RemoteGrant")) and callerRemote(scratch.allocator(), sender);
+    if (std.mem.eql(u8, m, "RemoteGrant")) {
+        var device: [*c]const u8 = null;
+        c.g_variant_get(params, "(&s)", &device);
+        const name = std.mem.trim(u8, std.mem.span(device), " \t\r\n");
+        if (!allowed and !remote) {
+            c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop or a paired device service can do this");
+            return;
+        }
+        if (name.len == 0) {
+            c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.InvalidArgs", "the device needs a name");
+            return;
+        }
+        const token = grant(std.mem.span(sender), name) orelse {
+            c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.Failed", "no randomness");
+            return;
+        };
+        const z: [33]u8 = token ++ [_]u8{0};
+        c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(s)", &z));
+        return;
+    }
+    if (!allowed and !remote and steering) {
         c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop shell can do this");
         return;
     }
@@ -987,16 +1045,28 @@ pub fn main() void {
 
 test "a granted token makes a session trusted and remembers who asked for it" {
     c.g_mutex_init(&lock);
-    const token = grant(":1.42").?;
+    const token = grant(":1.42", "").?;
     var line: [38]u8 = undefined;
     @memcpy(line[0..6], "token ");
     @memcpy(line[6..], &token);
     const live = redeem(&line) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings(":1.42", std.mem.sliceTo(&live.owner, 0));
+    try std.testing.expectEqualStrings("", std.mem.sliceTo(&live.device, 0));
     line[37] ^= 1;
     try std.testing.expect(redeem(&line) == null);
     try std.testing.expect(redeem("token short") == null);
     try std.testing.expect(redeem("{\"jsonrpc\":\"2.0\"}") == null);
+    for (&grants) |*g| g.* = null;
+}
+
+test "a remote grant carries the device name" {
+    c.g_mutex_init(&lock);
+    const token = grant(":1.7", "Pixel di Mirko").?;
+    var line: [38]u8 = undefined;
+    @memcpy(line[0..6], "token ");
+    @memcpy(line[6..], &token);
+    const live = redeem(&line) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("Pixel di Mirko", std.mem.sliceTo(&live.device, 0));
     for (&grants) |*g| g.* = null;
 }
 

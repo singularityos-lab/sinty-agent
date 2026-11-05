@@ -10,6 +10,12 @@ const SHELLS = [_][]const u8{
     "/opt/local/bin/singularity-desktop",
 };
 
+const REMOTES = [_][]const u8{
+    "/usr/libexec/singularity-nearby",
+    "/usr/local/libexec/singularity-nearby",
+    "/opt/local/libexec/singularity-nearby",
+};
+
 const COMPAT_ROOT = "/compat/linux";
 
 const TAINTING = [_][]const u8{ "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GTK_MODULES", "GTK_PATH", "GIO_EXTRA_MODULES", "GI_TYPELIB_PATH", "G_DEBUG" };
@@ -90,20 +96,27 @@ fn isSameRootOwnedFile(a: std.mem.Allocator, pid: i32, exe: []const u8) bool {
     return safe;
 }
 
-pub fn trusted(a: std.mem.Allocator, pid: i32) bool {
+fn listed(a: std.mem.Allocator, pid: i32, programs: []const []const u8, extra: []const u8) bool {
     if (pid <= 0) return false;
-    const raw = exeOf(a, pid);
-    const exe = canonical(raw);
-    if (options.test_trust.len != 0) {
-        var it = std.mem.splitScalar(u8, options.test_trust, ':');
+    const exe = canonical(exeOf(a, pid));
+    if (extra.len != 0) {
+        var it = std.mem.splitScalar(u8, extra, ':');
         while (it.next()) |p| {
             if (std.mem.eql(u8, p, exe)) return true;
         }
     }
-    for (SHELLS) |s| {
+    for (programs) |s| {
         if (std.mem.eql(u8, s, exe)) return isSameRootOwnedFile(a, pid, exe) and cleanEnv(a, pid);
     }
     return false;
+}
+
+pub fn trusted(a: std.mem.Allocator, pid: i32) bool {
+    return listed(a, pid, &SHELLS, options.test_trust);
+}
+
+pub fn remote(a: std.mem.Allocator, pid: i32) bool {
+    return listed(a, pid, &REMOTES, options.test_remote);
 }
 
 test "a preloaded library spoils the environment" {
@@ -121,6 +134,7 @@ test "system library paths do not spoil the environment" {
 
 test "nobody is trusted without a live process" {
     try std.testing.expect(!trusted(std.testing.allocator, 0));
+    try std.testing.expect(!remote(std.testing.allocator, 0));
 }
 
 test "canonical removes only the compat root" {

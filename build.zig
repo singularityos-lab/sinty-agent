@@ -40,6 +40,7 @@ fn exe(b: *std.Build, name: []const u8, root: []const u8, target: std.Build.Reso
         protocols(b, mod);
         const o = b.addOptions();
         o.addOption([]const u8, "test_trust", b.option([]const u8, "test-trust", "extra trusted programs, for tests only") orelse "");
+        o.addOption([]const u8, "test_remote", b.option([]const u8, "test-remote", "extra remote-control programs, for tests only") orelse "");
         mod.addOptions("build_options", o);
     }
     b.installArtifact(b.addExecutable(.{ .name = name, .root_module = mod }));
