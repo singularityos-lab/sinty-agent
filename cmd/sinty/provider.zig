@@ -443,8 +443,8 @@ fn grantedToken() []const u8 {
 }
 
 pub fn claudeCode(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
-    const local = onPath(a, "claude");
-    if (!local and !dshHas(a, "claude")) return error.NoProgram;
+    const local = !dshHas(a, "claude");
+    if (local and !onPath(a, "claude")) return error.NoProgram;
     const m = try mcpCommand(a, !local);
     const conf = try json.Stringify.valueAlloc(a, .{ .mcpServers = .{ .sinty = .{ .command = m[0], .args = [_][]const u8{m[1]}, .env = .{ .SINTY_AGENT_TOKEN = grantedToken() } } } }, .{});
     var words: std.ArrayList([]const u8) = .empty;
@@ -454,8 +454,8 @@ pub fn claudeCode(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![
 }
 
 pub fn codex(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
-    const local = onPath(a, "codex");
-    if (!local and !dshHas(a, "codex")) return error.NoProgram;
+    const local = !dshHas(a, "codex");
+    if (local and !onPath(a, "codex")) return error.NoProgram;
     const m = try mcpCommand(a, !local);
     const server = try std.fmt.allocPrint(a, "mcp_servers.sinty.command=\"{s}\"", .{m[0]});
     const args = try std.fmt.allocPrint(a, "mcp_servers.sinty.args=[\"{s}\"]", .{m[1]});
