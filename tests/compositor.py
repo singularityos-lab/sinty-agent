@@ -7,7 +7,7 @@ rt = os.environ["XDG_RUNTIME_DIR"]
 base = dict(os.environ, HOME=home, XDG_CONFIG_HOME=home, XDG_DATA_HOME=home, XDG_CACHE_HOME=home, XDG_STATE_HOME=home)
 base.pop("DISPLAY", None)
 log = open(home + "/labwc.log", "w")
-lab = subprocess.Popen(os.environ.get("LABWC", "labwc").split(), env=dict(base, WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1", LIBSEAT_BACKEND="noop", WLR_HEADLESS_OUTPUTS="1"), stdout=log, stderr=log)
+lab = subprocess.Popen(os.environ.get("LABWC", "labwc").split(), env=dict(base, WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1", LIBSEAT_BACKEND="noop", WLR_HEADLESS_OUTPUTS="2"), stdout=log, stderr=log)
 time.sleep(2)
 if lab.poll() is not None:
     log.flush(); print("labwc gone", open(home + "/labwc.log", errors="replace").read()[-1500:]); sys.exit(1)
@@ -90,6 +90,23 @@ time.sleep(0.8)
 w = next(x for x in json.loads(tool("windows_list")[1]) if x["id"] == wid)
 check("move resize", not e and w["x"] == 40 and w["y"] == 50 and w["width"] == 600, w)
 check("id stable", w["id"] == wid)
+
+e, t, _ = tool("outputs_list")
+outs = json.loads(t) if not e else []
+check("two screens listed", len(outs) == 2 and outs[0]["x"] < outs[1]["x"], t)
+if len(outs) == 2:
+    check("screens ordered", outs[0]["position"] == "leftmost" and outs[1]["position"] == "rightmost", outs)
+    e, t, _ = tool("window_set", id=wid, action="output", output="right")
+    reply = json.loads(t)["window"] if not e else {}
+    check("move to the right screen", not e and reply.get("output") == outs[1]["name"], t)
+    w = next(x for x in json.loads(tool("windows_list")[1]) if x["id"] == wid)
+    check("window really on the right screen", w["output"] == outs[1]["name"] and w["x"] >= outs[1]["x"], w)
+    e, t, _ = tool("window_set", id=wid, action="output", output=outs[0]["name"])
+    w = next(x for x in json.loads(tool("windows_list")[1]) if x["id"] == wid)
+    check("move back by name", not e and w["output"] == outs[0]["name"] and w["x"] < outs[1]["x"], (t, w))
+    check("unknown screen refused", tool("window_set", id=wid, action="output", output="HDMI-9")[0])
+    e, t, _ = tool("window_set", id=wid, action="move_resize", x=40, y=50, width=600, height=400)
+    time.sleep(0.5)
 
 e, t, c = tool("screen_capture", window=wid)
 check("window capture", not e and len(c) == 2 and c[1]["type"] == "image", t)

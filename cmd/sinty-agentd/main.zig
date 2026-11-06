@@ -301,12 +301,20 @@ fn appOpen(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     const file = std.fmt.allocPrintSentinel(a, "{s}.desktop", .{app}, 0) catch return fail("out of memory");
     const info = c.g_desktop_app_info_new(file.ptr) orelse return fail("application not found");
     defer c.g_object_unref(info);
+    const before = wl.windowIdsOf(a, app);
     var err: [*c]c.GError = null;
     if (c.g_app_info_launch(@ptrCast(info), null, null, &err) == 0) {
         defer c.g_clear_error(&err);
         return fail(a.dupe(u8, std.mem.span(err.*.message)) catch "launch failed");
     }
-    return .{ .text = "opened" };
+    const id: ?u32 = wl.waitForNewWindow(a, app, before, if (before.len == 0) 8000 else 1500) orelse if (before.len != 0) before[0] else null;
+    const window = id orelse return .{ .text = "launched, but no window of this application has appeared yet; check with windows_list before saying it is open" };
+    const output = str(args, "output");
+    var obj: std.json.ObjectMap = .empty;
+    obj.put(a, "id", .{ .integer = window }) catch return fail("out of memory");
+    obj.put(a, "action", .{ .string = if (output != null) "output" else "focus" }) catch return fail("out of memory");
+    if (output) |o| obj.put(a, "output", .{ .string = o }) catch return fail("out of memory");
+    return wl.windowSet(a, .{ .object = obj });
 }
 
 fn actionsOf(a: std.mem.Allocator, app: [:0]const u8) []const u8 {
@@ -624,7 +632,8 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "dbus_call")) return dbusCall(a, args);
     if (std.mem.eql(u8, name, "shell_run")) return shellRun(a, args);
     if (std.mem.eql(u8, name, "windows_list")) return wl.windows(a);
-    if (std.mem.eql(u8, name, "window_set")) return wl.windowSet(args);
+    if (std.mem.eql(u8, name, "window_set")) return wl.windowSet(a, args);
+    if (std.mem.eql(u8, name, "outputs_list")) return wl.outputs(a);
     if (std.mem.eql(u8, name, "window_close")) return wl.windowClose(args);
     if (std.mem.eql(u8, name, "screen_capture")) return wl.capture(a, args);
     if (std.mem.eql(u8, name, "pointer")) return wl.pointer(args);

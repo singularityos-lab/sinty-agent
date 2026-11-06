@@ -266,6 +266,10 @@ fn onRegistry(_: ?*const anyopaque, target: ?*anyopaque, op: u32, _: [*c]const c
         const o = gpa.create(Out) catch return 0;
         o.* = .{ .o = @ptrCast(bind(reg, id, &c.wl_output_interface, ver, 3)) };
         outs.append(gpa, o) catch return 0;
+        if (xdgMgr != null) {
+            const x = c.zxdg_output_manager_v1_get_xdg_output(xdgMgr, o.o);
+            _ = c.wl_proxy_add_dispatcher(@ptrCast(x), onXdgOut, o, null);
+        }
     } else if (is(name, &c.zwlr_foreign_toplevel_manager_v1_interface)) {
         mgr = @ptrCast(bind(reg, id, &c.zwlr_foreign_toplevel_manager_v1_interface, ver, 3));
         _ = c.wl_proxy_add_dispatcher(@ptrCast(mgr), onManager, null, null);
@@ -320,6 +324,7 @@ fn connect() bool {
     _ = c.wl_display_roundtrip(display);
     for (outs.items) |o| {
         if (xdgMgr == null) break;
+        if (o.name.len != 0) continue;
         const x = c.zxdg_output_manager_v1_get_xdg_output(xdgMgr, o.o);
         _ = c.wl_proxy_add_dispatcher(@ptrCast(x), onXdgOut, o, null);
     }
@@ -395,9 +400,93 @@ fn text(args: std.json.Value, key: []const u8) ?[]const u8 {
     return if (v == .string) v.string else null;
 }
 
+fn outJson(o: *Out, index: usize, count: usize) struct { name: []const u8, x: i32, y: i32, width: i32, height: i32, position: []const u8 } {
+    const pos: []const u8 = if (count == 1) "only" else if (index == 0) "leftmost" else if (index + 1 == count) "rightmost" else "middle";
+    return .{ .name = o.name, .x = o.x, .y = o.y, .width = o.w, .height = o.h, .position = pos };
+}
+
+fn sortedOutputs(a: std.mem.Allocator) []*Out {
+    const list = a.dupe(*Out, outs.items) catch return outs.items;
+    std.mem.sort(*Out, list, {}, struct {
+        fn lt(_: void, l: *Out, r: *Out) bool {
+            return if (l.x != r.x) l.x < r.x else l.y < r.y;
+        }
+    }.lt);
+    return list;
+}
+
+pub fn outputs(a: std.mem.Allocator) mcp.Outcome {
+    if (!enter()) return fail(NO_COMPOSITOR);
+    defer leave();
+    _ = c.wl_display_roundtrip(display);
+    const list = sortedOutputs(a);
+    var out: std.ArrayList(u8) = .empty;
+    out.append(a, '[') catch return fail("out of memory");
+    for (list, 0..) |o, i| {
+        if (i != 0) out.append(a, ',') catch {};
+        const s = std.json.Stringify.valueAlloc(a, outJson(o, i, list.len), .{}) catch return fail("out of memory");
+        out.appendSlice(a, s) catch {};
+    }
+    out.append(a, ']') catch {};
+    return .{ .text = out.items };
+}
+
+fn findOutput(a: std.mem.Allocator, want: []const u8) ?*Out {
+    const list = sortedOutputs(a);
+    if (list.len == 0) return null;
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(want, "left") or eq(want, "leftmost")) return list[0];
+    if (eq(want, "right") or eq(want, "rightmost")) return list[list.len - 1];
+    for (list) |o| {
+        if (eq(o.name, want)) return o;
+    }
+    return null;
+}
+
+fn outputOf(w: *Win) ?*Out {
+    for (outs.items) |o| {
+        if (o.name.len != 0 and std.mem.eql(u8, o.name, w.output)) return o;
+    }
+    return null;
+}
+
+fn moveToOutput(w: *Win, target: *Out) void {
+    const was_max = w.maximized;
+    const was_full = w.fullscreen;
+    if (was_full) c.zwlr_foreign_toplevel_handle_v1_unset_fullscreen(w.h);
+    if (was_max) c.zwlr_foreign_toplevel_handle_v1_unset_maximize(w.h);
+    if (was_max or was_full) refresh();
+    const ww = @max(1, @min(w.w, target.w));
+    const wh = @max(1, @min(w.ht, target.h));
+    var x = w.x;
+    var y = w.y;
+    if (outputOf(w)) |from| {
+        x = target.x + @divTrunc((w.x - from.x) * target.w, @max(1, from.w));
+        y = target.y + @divTrunc((w.y - from.y) * target.h, @max(1, from.h));
+    } else {
+        x = target.x + @divTrunc(target.w - ww, 2);
+        y = target.y + @divTrunc(target.h - wh, 2);
+    }
+    x = std.math.clamp(x, target.x, target.x + target.w - ww);
+    y = std.math.clamp(y, target.y, target.y + target.h - wh);
+    c.zsingularity_tiling_manager_v1_set_geometry(tiling, w.h, x, y, ww, wh);
+    _ = c.wl_display_roundtrip(display);
+    if (was_full) {
+        c.zwlr_foreign_toplevel_handle_v1_set_fullscreen(w.h, target.o);
+    } else if (was_max) {
+        c.zwlr_foreign_toplevel_handle_v1_maximize(w.h);
+    }
+}
+
+fn settled(a: std.mem.Allocator, w: *Win) mcp.Outcome {
+    refresh();
+    const s = std.json.Stringify.valueAlloc(a, winJson(w), .{}) catch return .{ .text = "done" };
+    return .{ .text = std.fmt.allocPrint(a, "{{\"window\":{s}}}", .{s}) catch "done" };
+}
+
 const SNAPS = [_][]const u8{ "none", "left", "right", "top", "bottom", "top_left", "top_right", "bottom_left", "bottom_right", "maximize" };
 
-pub fn windowSet(args: std.json.Value) mcp.Outcome {
+pub fn windowSet(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     const id = int(args, "id") orelse return fail("missing id");
     const action = text(args, "action") orelse return fail("missing action");
     if (!enter()) return fail(NO_COMPOSITOR);
@@ -441,9 +530,49 @@ pub fn windowSet(args: std.json.Value) mcp.Outcome {
         const n = int(args, "workspace") orelse return fail("missing workspace");
         if (n < 0) return fail("bad workspace");
         c.zsingularity_tiling_manager_v1_move_to_workspace(tiling, w.h, @intCast(n));
+    } else if (eq(u8, action, "output")) {
+        if (tiling == null) return fail("the compositor does not allow this");
+        const want = text(args, "output") orelse return fail("missing output");
+        const target = findOutput(a, want) orelse return fail("no such output; call outputs_list for the names");
+        moveToOutput(w, target);
+        refresh();
+        if (!std.mem.eql(u8, w.output, target.name)) {
+            return fail(std.fmt.allocPrint(a, "the window is still on {s}, not on {s}", .{ w.output, target.name }) catch "the window did not move");
+        }
     } else return fail("unknown action");
+    return settled(a, w);
+}
+
+pub fn waitForNewWindow(a: std.mem.Allocator, app: []const u8, known: []const u32, timeout_ms: u32) ?u32 {
+    var waited: u32 = 0;
+    while (waited <= timeout_ms) : (waited += 100) {
+        if (enter()) {
+            _ = c.wl_display_roundtrip(display);
+            for (wins.items) |w| {
+                if (!std.mem.eql(u8, w.app, app)) continue;
+                if (std.mem.indexOfScalar(u32, known, w.id) == null) {
+                    const id = w.id;
+                    leave();
+                    return id;
+                }
+            }
+            leave();
+        }
+        c.g_usleep(100 * 1000);
+    }
+    _ = a;
+    return null;
+}
+
+pub fn windowIdsOf(a: std.mem.Allocator, app: []const u8) []const u32 {
+    if (!enter()) return &.{};
+    defer leave();
     _ = c.wl_display_roundtrip(display);
-    return .{ .text = "done" };
+    var ids: std.ArrayList(u32) = .empty;
+    for (wins.items) |w| {
+        if (std.mem.eql(u8, w.app, app)) ids.append(a, w.id) catch {};
+    }
+    return ids.items;
 }
 
 pub const WindowPlace = struct { pid: i64, x: i32, y: i32 };

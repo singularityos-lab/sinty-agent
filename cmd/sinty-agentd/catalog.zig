@@ -20,8 +20,8 @@ pub const TOOLS = [_]Tool{
     },
     .{
         .name = "app_open",
-        .description = "Open an application, or bring it to the front.",
-        .schema = APP,
+        .description = "Open an application, or bring it to the front, and wait for its window. Optional output puts the window on that screen: an output name from outputs_list, or left / right. The reply is the window as the compositor reports it after the move; only describe where it is from that reply.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"app\":{\"type\":\"string\",\"description\":\"Application id, for example dev.sinty.write\"},\"output\":{\"type\":\"string\",\"description\":\"Screen to show the window on: an output name, left or right\"}},\"required\":[\"app\"]}",
         .risk = .undoable,
     },
     .{
@@ -74,9 +74,15 @@ pub const TOOLS = [_]Tool{
     },
     .{
         .name = "window_set",
-        .description = "Control a window from the compositor. action is focus, minimize, unminimize, maximize, unmaximize, fullscreen, unfullscreen, move_resize (x, y, width, height), snap (direction) or workspace (workspace).",
-        .schema = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"},\"action\":{\"type\":\"string\",\"enum\":[\"focus\",\"minimize\",\"unminimize\",\"maximize\",\"unmaximize\",\"fullscreen\",\"unfullscreen\",\"move_resize\",\"snap\",\"workspace\"]},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},\"direction\":{\"type\":\"string\",\"enum\":[\"left\",\"right\",\"top\",\"bottom\",\"top_left\",\"top_right\",\"bottom_left\",\"bottom_right\",\"maximize\"]},\"workspace\":{\"type\":\"integer\"}},\"required\":[\"id\",\"action\"]}",
+        .description = "Control a window from the compositor. action is focus, minimize, unminimize, maximize, unmaximize, fullscreen, unfullscreen, move_resize (x, y, width, height), snap (direction), workspace (workspace) or output (output: a name from outputs_list, left or right). The reply is the window state read back from the compositor; report that, not the request.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"},\"action\":{\"type\":\"string\",\"enum\":[\"focus\",\"minimize\",\"unminimize\",\"maximize\",\"unmaximize\",\"fullscreen\",\"unfullscreen\",\"move_resize\",\"snap\",\"workspace\",\"output\"]},\"output\":{\"type\":\"string\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},\"direction\":{\"type\":\"string\",\"enum\":[\"left\",\"right\",\"top\",\"bottom\",\"top_left\",\"top_right\",\"bottom_left\",\"bottom_right\",\"maximize\"]},\"workspace\":{\"type\":\"integer\"}},\"required\":[\"id\",\"action\"]}",
         .risk = .undoable,
+    },
+    .{
+        .name = "outputs_list",
+        .description = "List the screens: name, position and size in screen points, and whether each is the leftmost or rightmost. Use it to place windows on a specific screen.",
+        .schema = NONE,
+        .risk = .read,
     },
     .{
         .name = "window_close",
