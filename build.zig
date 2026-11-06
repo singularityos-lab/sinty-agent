@@ -68,6 +68,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(b.addExecutable(.{ .name = "sinty-agent-bridge", .root_module = bridge, .linkage = .static }));
     b.installFile("data/dev.sinty.Agent.service", "share/dbus-1/services/dev.sinty.Agent.service");
+    b.installFile("data/tour/75-sinty-ai.slide", "share/singularity/tour/75-sinty-ai.slide");
 
     const test_step = b.step("test", "run tests");
     for ([_][]const u8{ "cmd/sinty-agentd/policy.zig", "cmd/sinty-agentd/mcp.zig", "cmd/sinty-agentd/catalog.zig" }) |root| {

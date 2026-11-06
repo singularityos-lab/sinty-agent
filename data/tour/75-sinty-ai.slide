@@ -1,0 +1,7 @@
+[Slide]
+Order=75
+Title=Ask Sinty AI
+Body=Press Super+A and say what you need. Sinty AI opens apps, writes notes and changes settings for you, and asks first before anything that cannot be undone. It stays off until you choose a model.
+Scene=assistant
+Action=settings:agent
+ActionLabel=Set Up Sinty AI
