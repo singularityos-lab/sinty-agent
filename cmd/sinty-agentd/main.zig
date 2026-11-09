@@ -579,6 +579,40 @@ fn dbusCall(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     return .{ .text = a.dupe(u8, std.mem.span(c.g_variant_print(r, 1))) catch "" };
 }
 
+fn profilesCall(a: std.mem.Allocator, method: [*:0]const u8, params: ?*c.GVariant, reply: ?[*:0]const u8) mcp.Outcome {
+    var err: [*c]c.GError = null;
+    const r = c.g_dbus_connection_call_sync(bus, "dev.sinty.Profiles", "/dev/sinty/Profiles", "dev.sinty.Profiles1", method, params, if (reply) |t| vt(t) else null, c.G_DBUS_CALL_FLAGS_NONE, 15000, null, &err);
+    if (r == null) return gerror(a, &err);
+    defer c.g_variant_unref(r);
+    if (reply == null) return .{ .text = "done" };
+    const child = c.g_variant_get_child_value(r, 0);
+    defer c.g_variant_unref(child);
+    return .{ .text = a.dupe(u8, std.mem.span(c.g_variant_get_string(child, null))) catch "" };
+}
+
+fn profiles(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome {
+    if (std.mem.eql(u8, name, "profiles_list")) {
+        const list = profilesCall(a, "ListProfiles", null, "(s)");
+        if (list.failed) return list;
+        var err: [*c]c.GError = null;
+        const r = c.g_dbus_connection_call_sync(bus, "dev.sinty.Profiles", "/dev/sinty/Profiles", "dev.sinty.Profiles1", "Status", null, vt("(a{sv})"), c.G_DBUS_CALL_FLAGS_NONE, 5000, null, &err);
+        if (r == null) return gerror(a, &err);
+        defer c.g_variant_unref(r);
+        const text = std.fmt.allocPrint(a, "{{\"status\":\"{s}\",\"profiles\":{s}}}", .{ std.mem.span(c.g_variant_print(r, 0)), list.text }) catch return fail("out of memory");
+        return .{ .text = text };
+    }
+    if (std.mem.eql(u8, name, "profile_activate")) {
+        const id = str(args, "id") orelse return fail("missing id");
+        return profilesCall(a, "ActivateFrom", c.g_variant_new("(ss)", id.ptr, "agent"), null);
+    }
+    if (std.mem.eql(u8, name, "profile_deactivate")) return profilesCall(a, "Deactivate", null, null);
+    if (std.mem.eql(u8, name, "profile_save")) {
+        const data = str(args, "profile") orelse return fail("missing profile");
+        return profilesCall(a, "SaveProfile", c.g_variant_new("(s)", data.ptr), "(s)");
+    }
+    return fail("unknown profiles tool");
+}
+
 fn shellRun(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     const command = str(args, "command") orelse return fail("missing command");
     if (c.g_find_program_in_path("dsh") == null) return fail("dsh is not available on this system");
@@ -610,6 +644,7 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "open_uri")) return openUri(a, args);
     if (std.mem.eql(u8, name, "conversations")) return conversations(a, args);
     if (std.mem.eql(u8, name, "notify")) return notify(args);
+    if (std.mem.startsWith(u8, name, "profile")) return profiles(a, name, args);
     if (std.mem.eql(u8, name, "ui_tree")) {
         const v = args.object.get("window") orelse return fail("missing window");
         if (v != .integer) return fail("missing window");

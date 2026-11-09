@@ -163,6 +163,30 @@ pub const TOOLS = [_]Tool{
         .risk = .irreversible,
     },
     .{
+        .name = "profiles_list",
+        .description = "List the profiles (Work, Evening, Game, Presentation, Sleep and the user's own) as JSON with their settings and rules, plus which one is on and why. A setting missing from a profile means it is left unchanged.",
+        .schema = NONE,
+        .risk = .read,
+    },
+    .{
+        .name = "profile_activate",
+        .description = "Turn a profile on by its id from profiles_list. The user gets a notification saying Sinty Agent turned it on; turning it off puts back what it changed.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}",
+        .risk = .undoable,
+    },
+    .{
+        .name = "profile_deactivate",
+        .description = "Turn off the profile that is on. Settings the profile changed go back, unless the user changed them by hand meanwhile.",
+        .schema = NONE,
+        .risk = .undoable,
+    },
+    .{
+        .name = "profile_save",
+        .description = "Create or update a profile. Pass the whole profile as JSON text in the same shape profiles_list returns; values are JSON text strings keyed by area and setting. A new profile needs an empty id and a name. Returns the saved id.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"profile\":{\"type\":\"string\",\"description\":\"Profile JSON\"}},\"required\":[\"profile\"]}",
+        .risk = .undoable,
+    },
+    .{
         .name = "agent_status",
         .description = "Show the current mode and whether the agent is stopped.",
         .schema = NONE,
