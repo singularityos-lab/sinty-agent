@@ -183,11 +183,22 @@ fn appPath(a: std.mem.Allocator, app: []const u8) ![:0]u8 {
     return out;
 }
 
+fn appBus(a: std.mem.Allocator, app: [:0]const u8) [:0]const u8 {
+    const file = std.fmt.allocPrintSentinel(a, "{s}.desktop", .{app}, 0) catch return app;
+    const info = c.g_desktop_app_info_new(file.ptr) orelse return app;
+    defer c.g_object_unref(info);
+    const raw = c.g_desktop_app_info_get_string(info, "X-Sinty-Agent-Bus") orelse return app;
+    defer c.g_free(raw);
+    if (c.g_dbus_is_name(raw) == 0 or c.g_dbus_is_unique_name(raw) != 0) return app;
+    return a.dupeZ(u8, std.mem.span(raw)) catch app;
+}
+
 fn appCall(a: std.mem.Allocator, app: [:0]const u8, iface: [*:0]const u8, method: [*:0]const u8, params: ?*c.GVariant, ret: [*:0]const u8) mcp.Outcome {
     if (c.g_dbus_is_name(app.ptr) == 0) return fail("invalid application id");
     const path = appPath(a, app) catch return fail("out of memory");
+    const name = appBus(a, app);
     var err: [*c]c.GError = null;
-    const r = c.g_dbus_connection_call_sync(bus, app.ptr, path.ptr, iface, method, params, vt(ret), c.G_DBUS_CALL_FLAGS_NONE, CALL_MS, null, &err);
+    const r = c.g_dbus_connection_call_sync(bus, name.ptr, path.ptr, iface, method, params, vt(ret), c.G_DBUS_CALL_FLAGS_NONE, CALL_MS, null, &err);
     if (r == null) {
         defer c.g_clear_error(&err);
         return fail(a.dupe(u8, std.mem.span(err.*.message)) catch "call failed");
@@ -319,7 +330,7 @@ fn appOpen(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
 
 fn actionsOf(a: std.mem.Allocator, app: [:0]const u8) []const u8 {
     const path = appPath(a, app) catch return "[]";
-    const r = c.g_dbus_connection_call_sync(bus, app.ptr, path.ptr, "org.gtk.Actions", "List", null, vt("(as)"), c.G_DBUS_CALL_FLAGS_NONE, 5000, null, null);
+    const r = c.g_dbus_connection_call_sync(bus, appBus(a, app).ptr, path.ptr, "org.gtk.Actions", "List", null, vt("(as)"), c.G_DBUS_CALL_FLAGS_NONE, 5000, null, null);
     if (r == null) return "[]";
     defer c.g_variant_unref(r);
     var names: std.ArrayList([]const u8) = .empty;
