@@ -6,7 +6,7 @@ pub const c = @cImport({
 
 const json = std.json;
 const MAX_TURNS = 120;
-const CODEX_OFF = [_][]const u8{ "shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external", "computer_use", "in_app_browser", "image_generation", "plugins", "view_image", "goals", "hooks", "skill_search", "tool_suggest", "worktrees" };
+const CODEX_OFF = [_][]const u8{ "shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external", "computer_use", "in_app_browser", "image_generation", "plugins", "view_image", "goals", "hooks", "skill_search", "tool_suggest", "worktrees", "multi_agent", "sleep_tool", "workspace_dependencies", "skill_mcp_dependency_install", "shell_snapshot", "remote_plugin" };
 const SYSTEM =
     \\You control this computer through tools. Act, do not describe what the user could do.
     \\Start from apps_list and app_intents when you do not know the id of an application or the name of an intent.
@@ -476,29 +476,157 @@ pub fn claudeCode(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![
     return spawnCli(a, words.items, !local);
 }
 
+const Rpc = struct {
+    a: std.mem.Allocator,
+    in_fd: c_int,
+    out_fd: c_int,
+    pending: std.ArrayList(u8) = .empty,
+
+    fn send(self: *Rpc, v: anytype) Error!void {
+        const line = try json.Stringify.valueAlloc(self.a, v, .{ .emit_null_optional_fields = false });
+        const full = try std.fmt.allocPrint(self.a, "{s}\n", .{line});
+        var off: usize = 0;
+        while (off < full.len) {
+            const n = std.c.write(self.in_fd, full[off..].ptr, full.len - off);
+            if (n <= 0) return error.Http;
+            off += @intCast(n);
+        }
+    }
+
+    fn next(self: *Rpc) Error!json.Value {
+        var buf: [65536]u8 = undefined;
+        while (true) {
+            if (std.mem.indexOfScalar(u8, self.pending.items, '\n')) |end| {
+                const copy = try self.a.dupe(u8, self.pending.items[0..end]);
+                try self.pending.replaceRange(self.a, 0, end + 1, &.{});
+                const v = json.parseFromSliceLeaky(json.Value, self.a, copy, .{}) catch continue;
+                if (v == .object) return v;
+                continue;
+            }
+            const n = std.c.read(self.out_fd, &buf, buf.len);
+            if (n <= 0) return error.Http;
+            try self.pending.appendSlice(self.a, buf[0..@intCast(n)]);
+        }
+    }
+
+    fn result(self: *Rpc, id: i64) Error!json.Value {
+        while (true) {
+            const v = try self.next();
+            const got = v.object.get("id") orelse continue;
+            if (v.object.get("method") != null) {
+                try self.refuse(got);
+                continue;
+            }
+            if (got != .integer or got.integer != id) continue;
+            if (v.object.get("error") != null) return error.Http;
+            return v.object.get("result") orelse error.BadAnswer;
+        }
+    }
+
+    fn refuse(self: *Rpc, id: json.Value) Error!void {
+        try self.send(.{ .id = id, .@"error" = .{ .code = -32601, .message = "Sinty allows only its own tools" } });
+    }
+};
+
+fn codexArgv(a: std.mem.Allocator, inDsh: bool) Error![]?[*:0]const u8 {
+    var words: std.ArrayList([]const u8) = .empty;
+    try words.appendSlice(a, &.{ "codex", "app-server", "-c", "web_search=\"disabled\"", "-c", "mcp_servers={}" });
+    for (CODEX_OFF) |f| try words.appendSlice(a, &.{ "--disable", f });
+    var argv: std.ArrayList(?[*:0]const u8) = .empty;
+    if (inDsh) {
+        var line: std.ArrayList(u8) = .empty;
+        try line.appendSlice(a, "exec");
+        for (words.items) |w| {
+            try line.append(a, ' ');
+            try line.appendSlice(a, try quote(a, w));
+        }
+        try argv.appendSlice(a, &.{ "dsh", "-c", (try z(a, line.items)).ptr });
+    } else {
+        for (words.items) |w| try argv.append(a, (try z(a, w)).ptr);
+    }
+    try argv.append(a, null);
+    return argv.items;
+}
+
 pub fn codex(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
     const local = !dshHas(a, "codex");
     if (local and !onPath(a, "codex")) return error.NoProgram;
-    if (!cfg.tools) {
-        var plain: std.ArrayList([]const u8) = .empty;
-        try plain.appendSlice(a, &.{ "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "-c", "web_search=\"disabled\"" });
-        for (CODEX_OFF) |f| try plain.appendSlice(a, &.{ "--disable", f });
-        if (cfg.model.len > 0) try plain.appendSlice(a, &.{ "--model", cfg.model });
-        try plain.append(a, prompt);
-        return spawnCli(a, plain.items, !local);
+    var mcp: ?Mcp = if (cfg.tools) try Mcp.open(a) else null;
+    var tools = arr(a);
+    if (mcp) |*m| for (try m.tools()) |t| {
+        var d = obj(a);
+        try d.put(a, "type", str("function"));
+        try d.put(a, "name", t.object.get("name") orelse continue);
+        try d.put(a, "description", t.object.get("description") orelse str(""));
+        try d.put(a, "inputSchema", t.object.get("inputSchema") orelse continue);
+        try tools.append(.{ .object = d });
+    };
+    const argv = try codexArgv(a, !local);
+    var pid: c.GPid = 0;
+    var in_fd: c_int = -1;
+    var out_fd: c_int = -1;
+    if (c.g_spawn_async_with_pipes(null, @ptrCast(argv.ptr), null, c.G_SPAWN_SEARCH_PATH | c.G_SPAWN_STDERR_TO_DEV_NULL, null, null, &pid, &in_fd, &out_fd, null, null) == 0) return error.NoProgram;
+    defer {
+        _ = std.c.close(in_fd);
+        _ = std.c.close(out_fd);
+        _ = std.c.kill(pid, std.posix.SIG.TERM);
+        c.g_spawn_close_pid(pid);
     }
-    const m = try mcpCommand(a, !local);
-    const server = try std.fmt.allocPrint(a, "mcp_servers.sinty.command=\"{s}\"", .{m[0]});
-    const args = try std.fmt.allocPrint(a, "mcp_servers.sinty.args=[\"{s}\"]", .{m[1]});
-    const env = try std.fmt.allocPrint(a, "mcp_servers.sinty.env={{SINTY_AGENT_TOKEN=\"{s}\"}}", .{grantedToken()});
-    const approve = "mcp_servers.sinty.default_tools_approval_mode=\"approve\"";
-    const full = try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ SYSTEM, prompt });
-    var words: std.ArrayList([]const u8) = .empty;
-    try words.appendSlice(a, &.{ "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "-c", "web_search=\"disabled\"", "-c", server, "-c", args, "-c", env, "-c", approve });
-    for (CODEX_OFF) |f| try words.appendSlice(a, &.{ "--disable", f });
-    if (cfg.model.len > 0) try words.appendSlice(a, &.{ "--model", cfg.model });
-    try words.append(a, full);
-    return spawnCli(a, words.items, !local);
+    var rpc: Rpc = .{ .a = a, .in_fd = in_fd, .out_fd = out_fd };
+    try rpc.send(.{ .id = 1, .method = "initialize", .params = .{ .clientInfo = .{ .name = "sinty", .version = "0.1" }, .capabilities = .{ .experimentalApi = true } } });
+    _ = try rpc.result(1);
+    try rpc.send(.{ .method = "initialized" });
+    var start = obj(a);
+    try start.put(a, "ephemeral", .{ .bool = true });
+    try start.put(a, "approvalPolicy", str("never"));
+    try start.put(a, "sandbox", str("read-only"));
+    try start.put(a, "developerInstructions", str(SYSTEM));
+    try start.put(a, "cwd", str(std.mem.span(c.g_get_home_dir())));
+    if (tools.items.len > 0) try start.put(a, "dynamicTools", .{ .array = tools });
+    if (cfg.model.len > 0) try start.put(a, "model", str(cfg.model));
+    try rpc.send(.{ .id = 2, .method = "thread/start", .params = json.Value{ .object = start } });
+    const started = try rpc.result(2);
+    const thread = (if (started == .object) started.object.get("thread") else null) orelse return error.BadAnswer;
+    const thread_id = field(thread, "id") orelse return error.BadAnswer;
+    try rpc.send(.{ .id = 3, .method = "turn/start", .params = .{ .threadId = thread_id, .input = [_]struct { type: []const u8, text: []const u8 }{.{ .type = "text", .text = prompt }} } });
+    var said: []const u8 = "";
+    var calls: usize = 0;
+    while (true) {
+        const v = try rpc.next();
+        const method = field(v, "method");
+        const id = v.object.get("id");
+        if (method == null) {
+            if (id != null and v.object.get("error") != null) return error.Http;
+            continue;
+        }
+        const params = v.object.get("params") orelse json.Value{ .null = {} };
+        if (id) |rid| {
+            if (!std.mem.eql(u8, method.?, "item/tool/call") or mcp == null) {
+                try rpc.refuse(rid);
+                continue;
+            }
+            calls += 1;
+            if (calls > MAX_TURNS) return error.TooManyTurns;
+            const m = &mcp.?;
+            const name = field(params, "tool") orelse return error.BadAnswer;
+            const out = try m.tool(name, params.object.get("arguments") orelse json.Value{ .null = {} });
+            try rpc.send(.{ .id = rid, .result = .{ .contentItems = [_]struct { type: []const u8, text: []const u8 }{.{ .type = "inputText", .text = out }}, .success = true } });
+            continue;
+        }
+        if (std.mem.eql(u8, method.?, "item/completed")) {
+            const item = params.object.get("item") orelse continue;
+            const kind = field(item, "type") orelse continue;
+            if (std.mem.eql(u8, kind, "agentMessage")) said = field(item, "text") orelse said;
+        } else if (std.mem.eql(u8, method.?, "turn/completed")) {
+            const turn = params.object.get("turn") orelse return error.BadAnswer;
+            const status = field(turn, "status") orelse "";
+            if (std.mem.eql(u8, status, "completed")) return said;
+            if (turn.object.get("error")) |e| {
+                if (field(e, "message")) |msg| std.debug.print("{s}\n", .{msg});
+            }
+            return error.Http;
+        }
+    }
 }
 
 pub fn run(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
