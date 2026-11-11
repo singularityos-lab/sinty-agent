@@ -313,8 +313,15 @@ pub fn claudeApi(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]
 }
 
 pub fn ollama(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
+    return ollamaChat(a, cfg, prompt, if (cfg.endpoint.len > 0) cfg.endpoint else "https://ollama.com", try lookupKey(a, "ollama"));
+}
+
+pub fn localModel(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
+    return ollamaChat(a, cfg, prompt, if (cfg.endpoint.len > 0) cfg.endpoint else "http://127.0.0.1:11434", "");
+}
+
+fn ollamaChat(a: std.mem.Allocator, cfg: Config, prompt: []const u8, base: []const u8, key: []const u8) Error![]const u8 {
     if (cfg.model.len == 0) return error.NoModel;
-    const key = try lookupKey(a, "ollama");
     var mcp = try Mcp.open(a);
     var tools = arr(a);
     for (try mcp.tools()) |t| {
@@ -336,8 +343,9 @@ pub fn ollama(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]con
     try first.put(a, "role", str("user"));
     try first.put(a, "content", str(prompt));
     try messages.append(.{ .object = first });
-    const url = try std.fmt.allocPrint(a, "{s}/api/chat", .{if (cfg.endpoint.len > 0) cfg.endpoint else "https://ollama.com"});
+    const url = try std.fmt.allocPrint(a, "{s}/api/chat", .{base});
     const auth = try std.fmt.allocPrint(a, "Bearer {s}", .{key});
+    const headers: []const [2][]const u8 = if (key.len > 0) &.{.{ "Authorization", auth }} else &.{};
     var turn: usize = 0;
     while (turn < MAX_TURNS) : (turn += 1) {
         var req = obj(a);
@@ -346,7 +354,7 @@ pub fn ollama(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]con
         try req.put(a, "tools", .{ .array = tools });
         try req.put(a, "messages", .{ .array = messages });
         const body = try json.Stringify.valueAlloc(a, json.Value{ .object = req }, .{});
-        const reply = try post(a, url, body, &.{.{ "Authorization", auth }});
+        const reply = try post(a, url, body, headers);
         if (reply != .object) return error.BadAnswer;
         const m = reply.object.get("message") orelse return error.BadAnswer;
         if (m != .object) return error.BadAnswer;
@@ -479,6 +487,7 @@ pub fn codex(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]cons
 pub fn run(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
     if (std.mem.eql(u8, cfg.provider, "claude-api")) return claudeApi(a, cfg, prompt);
     if (std.mem.eql(u8, cfg.provider, "ollama")) return ollama(a, cfg, prompt);
+    if (std.mem.eql(u8, cfg.provider, "local")) return localModel(a, cfg, prompt);
     if (std.mem.eql(u8, cfg.provider, "claude-code")) return claudeCode(a, cfg, prompt);
     if (std.mem.eql(u8, cfg.provider, "codex")) return codex(a, cfg, prompt);
     return error.NoProvider;

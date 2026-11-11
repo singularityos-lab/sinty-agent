@@ -9,7 +9,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn usage() noreturn {
-    fatal("usage: sinty ask [--provider NAME] [--model NAME] [--endpoint URL] [--conversation ID] TEXT\n       sinty key PROVIDER (reads the key from standard input)\nproviders: {s}", .{"claude-code codex claude-api ollama"});
+    fatal("usage: sinty ask [--provider NAME] [--model NAME] [--endpoint URL] [--conversation ID] TEXT\n       sinty key PROVIDER (reads the key from standard input)\nproviders: {s}", .{"local claude-code codex claude-api ollama"});
 }
 
 fn storeKey(p: []const u8) void {
