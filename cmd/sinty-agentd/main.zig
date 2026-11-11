@@ -10,6 +10,7 @@ const wl = @import("wl.zig");
 const trust = @import("trust.zig");
 const a11y = @import("a11y.zig");
 const changes = @import("changes.zig");
+const tasks = @import("tasks.zig");
 
 const EMPTY: [:0]const u8 = "";
 const BRIDGE = "/usr/libexec/sinty-agent-bridge";
@@ -72,6 +73,7 @@ const Grant = struct {
     expires: i64,
     owner: [OWNER_MAX:0]u8 = .{0} ** OWNER_MAX,
     device: [OWNER_MAX:0]u8 = .{0} ** OWNER_MAX,
+    label: [OWNER_MAX:0]u8 = .{0} ** OWNER_MAX,
 };
 
 var grants: [16]?Grant = .{null} ** 16;
@@ -659,6 +661,12 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "app_action")) return appAction(a, args);
     if (std.mem.eql(u8, name, "agent_status")) return .{ .text = status(a) };
     if (std.mem.eql(u8, name, "changes_list")) return .{ .text = changesList(a) };
+    if (std.mem.eql(u8, name, "tasks_list")) return tasksList(a);
+    if (std.mem.eql(u8, name, "task_save")) return taskSave(a, args);
+    if (std.mem.eql(u8, name, "task_delete")) return taskDelete(a, args);
+    if (std.mem.eql(u8, name, "plans_list")) return .{ .text = fileOf(plans_path) orelse "[]" };
+    if (std.mem.eql(u8, name, "plan_save")) return planSave(a, args);
+    if (std.mem.eql(u8, name, "plan_step")) return planStep(a, args);
     if (std.mem.eql(u8, name, "change_undo")) {
         const v = if (args == .object) args.object.get("id") else null;
         const id: u32 = if (v != null and v.? == .integer and v.?.integer > 0) @intCast(v.?.integer) else 0;
@@ -999,6 +1007,7 @@ fn serve(fd: c_int, guest: bool) void {
                         session.kind = .trusted;
                         session.owner = g.owner;
                         session.device = g.device;
+                        if (g.label[0] != 0) session.peer = gpa.dupe(u8, std.mem.sliceTo(&g.label, 0)) catch session.peer;
                         if (g.device[0] != 0) {
                             session.peer = std.mem.sliceTo(&session.device, 0);
                             remoteBegin(&session.device);
@@ -1263,6 +1272,321 @@ fn onBus(conn: ?*c.GDBusConnection, _: [*c]const u8, _: c.gpointer) callconv(.c)
 }
 
 var config_path: [:0]const u8 = "";
+var background = false;
+var started: i64 = 0;
+var tasks_path: [:0]const u8 = "";
+var task_state_path: [:0]const u8 = "";
+var plans_path: [:0]const u8 = "";
+var running: std.StringHashMapUnmanaged(void) = .empty;
+var resumed: std.StringHashMapUnmanaged(void) = .empty;
+var monitors: std.ArrayList(*c.GFileMonitor) = .empty;
+var monitored_stamp: i64 = -1;
+
+const BG_NOTE =
+    \\
+    \\
+    \\This runs in the background while the user does something else. Do the work with the Sinty tools, read every change back, and never claim something is done that you did not read back. Anything that cannot be undone still waits for the user's confirmation. For work of more than one step, keep a plan with plan_save and mark each step with plan_step, so it can continue after a restart. End with one short paragraph saying what you did.
+;
+
+fn nowSec() i64 {
+    return @divTrunc(c.g_get_real_time(), 1000000);
+}
+
+fn writeFile(path: [:0]const u8, data: []const u8) bool {
+    return c.g_file_set_contents_full(path.ptr, data.ptr, @intCast(data.len), c.G_FILE_SET_CONTENTS_CONSISTENT, 0o600, null) != 0;
+}
+
+fn loadTasks(a: std.mem.Allocator) []tasks.Task {
+    return tasks.parseAll(a, fileOf(tasks_path) orelse "[]");
+}
+
+fn lastRuns(a: std.mem.Allocator) std.json.ObjectMap {
+    const raw = fileOf(task_state_path) orelse return .empty;
+    const v = std.json.parseFromSliceLeaky(std.json.Value, a, raw, .{}) catch return .empty;
+    return if (v == .object) v.object else .empty;
+}
+
+fn lastRun(runs: std.json.ObjectMap, id: []const u8) i64 {
+    const v = runs.get(id) orelse return 0;
+    if (v != .object) return 0;
+    const t = v.object.get("time") orelse return 0;
+    return if (t == .integer) t.integer else 0;
+}
+
+fn backgroundOn() bool {
+    c.g_mutex_lock(&lock);
+    defer c.g_mutex_unlock(&lock);
+    return background;
+}
+
+fn tasksList(a: std.mem.Allocator) mcp.Outcome {
+    const raw = fileOf(tasks_path) orelse "[]";
+    const runs = lastRuns(a);
+    var parsed = std.json.parseFromSliceLeaky(std.json.Value, a, raw, .{}) catch std.json.Value{ .array = .init(a) };
+    if (parsed != .array) parsed = .{ .array = .init(a) };
+    for (parsed.array.items) |*item| {
+        if (item.* != .object) continue;
+        const id = item.object.get("id") orelse continue;
+        if (id != .string) continue;
+        if (runs.get(id.string)) |r| item.object.put(a, "last_run", r) catch {};
+    }
+    const list = std.json.Stringify.valueAlloc(a, parsed, .{}) catch "[]";
+    const text = std.fmt.allocPrint(a, "{{\"background\":{},\"tasks\":{s}}}", .{ backgroundOn(), list }) catch return fail("out of memory");
+    return .{ .text = text };
+}
+
+fn jsonArg(a: std.mem.Allocator, args: std.json.Value, key: []const u8) ?std.json.Value {
+    if (args != .object) return null;
+    const v = args.object.get(key) orelse return null;
+    if (v == .string) return std.json.parseFromSliceLeaky(std.json.Value, a, v.string, .{}) catch null;
+    return v;
+}
+
+fn taskSave(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const v = jsonArg(a, args, "task") orelse return fail("missing task");
+    const t = tasks.parseTask(v) orelse return fail("a task needs id (letters, digits, - and _), prompt and one of every_minutes (5 or more), at (HH:MM) or event (login, files:PATH)");
+    const raw = fileOf(tasks_path) orelse "[]";
+    var list = std.json.parseFromSliceLeaky(std.json.Value, a, raw, .{}) catch std.json.Value{ .array = .init(a) };
+    if (list != .array) list = .{ .array = .init(a) };
+    var replaced = false;
+    for (list.array.items) |*item| {
+        if (item.* != .object) continue;
+        const id = item.object.get("id") orelse continue;
+        if (id == .string and std.mem.eql(u8, id.string, t.id)) {
+            item.* = v;
+            replaced = true;
+        }
+    }
+    if (!replaced) list.array.append(v) catch return fail("out of memory");
+    const out = std.json.Stringify.valueAlloc(a, list, .{ .whitespace = .indent_2 }) catch return fail("out of memory");
+    _ = c.g_mkdir_with_parents(c.g_path_get_dirname(tasks_path.ptr), 0o700);
+    if (!writeFile(tasks_path, out)) return fail("cannot write the task list");
+    for (loadTasks(a)) |b| {
+        if (!std.mem.eql(u8, b.id, t.id)) continue;
+        const off: []const u8 = if (backgroundOn()) "" else "; work in the background is off in Settings, so it runs only once the user turns it on";
+        return .{ .text = std.fmt.allocPrint(a, "saved task {s}, read back from the task list{s}", .{ t.id, off }) catch "saved" };
+    }
+    return fail("NOT DONE: the task is not in the list after saving");
+}
+
+fn taskDelete(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const id = str(args, "id") orelse return fail("missing id");
+    const raw = fileOf(tasks_path) orelse return fail("no such task");
+    var list = std.json.parseFromSliceLeaky(std.json.Value, a, raw, .{}) catch return fail("broken task list");
+    if (list != .array) return fail("broken task list");
+    var i: usize = 0;
+    var found = false;
+    while (i < list.array.items.len) {
+        const item = list.array.items[i];
+        const iv = if (item == .object) item.object.get("id") else null;
+        if (iv != null and iv.? == .string and std.mem.eql(u8, iv.?.string, id)) {
+            _ = list.array.orderedRemove(i);
+            found = true;
+        } else i += 1;
+    }
+    if (!found) return fail("no such task");
+    const out = std.json.Stringify.valueAlloc(a, list, .{ .whitespace = .indent_2 }) catch return fail("out of memory");
+    if (!writeFile(tasks_path, out)) return fail("cannot write the task list");
+    return .{ .text = std.fmt.allocPrint(a, "deleted task {s}", .{id}) catch "deleted" };
+}
+
+fn planSave(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const v = jsonArg(a, args, "plan") orelse return fail("missing plan");
+    const one = std.json.parseFromValueLeaky(tasks.Plan, a, v, .{ .ignore_unknown_fields = true }) catch return fail("a plan needs id, title and steps with text");
+    if (!tasks.validId(one.id) or one.steps.len == 0) return fail("a plan needs an id (letters, digits, - and _) and at least one step");
+    const plans = tasks.parsePlans(a, fileOf(plans_path) orelse "[]");
+    var out: std.ArrayList(tasks.Plan) = .empty;
+    for (plans) |p| {
+        if (!std.mem.eql(u8, p.id, one.id)) out.append(a, p) catch {};
+    }
+    out.append(a, one) catch return fail("out of memory");
+    const text = std.json.Stringify.valueAlloc(a, out.items, .{ .whitespace = .indent_2 }) catch return fail("out of memory");
+    if (!writeFile(plans_path, text)) return fail("cannot write the plans");
+    return .{ .text = std.fmt.allocPrint(a, "saved plan {s} with {d} steps; it continues after a restart while it is active", .{ one.id, one.steps.len }) catch "saved" };
+}
+
+fn planStep(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const id = str(args, "id") orelse return fail("missing id");
+    const sv = if (args == .object) args.object.get("step") else null;
+    if (sv == null or sv.? != .integer or sv.?.integer < 0) return fail("missing step");
+    const step: usize = @intCast(sv.?.integer);
+    const result = str(args, "result") orelse "";
+    const plans = tasks.parsePlans(a, fileOf(plans_path) orelse "[]");
+    for (plans) |*p| {
+        if (!std.mem.eql(u8, p.id, id)) continue;
+        if (step >= p.steps.len) return fail("no such step");
+        p.steps[step].done = true;
+        p.steps[step].result = result;
+        if (str(args, "status")) |st| {
+            if (std.mem.eql(u8, st, "active") or std.mem.eql(u8, st, "paused") or std.mem.eql(u8, st, "done")) p.status = st;
+        }
+        if (tasks.nextStep(p.*) == null and std.mem.eql(u8, p.status, "active")) p.status = "done";
+        const text = std.json.Stringify.valueAlloc(a, plans, .{ .whitespace = .indent_2 }) catch return fail("out of memory");
+        if (!writeFile(plans_path, text)) return fail("cannot write the plans");
+        if (tasks.nextStep(p.*)) |n| return .{ .text = std.fmt.allocPrint(a, "step {d} done; next is step {d}: {s}", .{ step, n, p.steps[n].text }) catch "done" };
+        return .{ .text = std.fmt.allocPrint(a, "step {d} done; the plan is {s}", .{ step, p.status }) catch "done" };
+    }
+    return fail("no such plan");
+}
+
+const Job = struct { id: []u8, title: []u8, prompt: []u8 };
+
+fn finishJob(job: *Job, ok: bool, said: []const u8) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var runs = lastRuns(a);
+    var entry: std.json.ObjectMap = .empty;
+    entry.put(a, "time", .{ .integer = nowSec() }) catch {};
+    entry.put(a, "ok", .{ .bool = ok }) catch {};
+    entry.put(a, "said", .{ .string = said[0..@min(said.len, 2000)] }) catch {};
+    runs.put(a, job.id, .{ .object = entry }) catch {};
+    const text = std.json.Stringify.valueAlloc(a, std.json.Value{ .object = runs }, .{}) catch "{}";
+    _ = writeFile(task_state_path, text);
+    var note: std.json.ObjectMap = .empty;
+    note.put(a, "title", .{ .string = job.title }) catch {};
+    const fallback: []const u8 = if (ok) "Done." else "It did not finish.";
+    note.put(a, "body", .{ .string = if (said.len > 0) said[0..@min(said.len, 400)] else fallback }) catch {};
+    _ = notify(.{ .object = note });
+    c.g_mutex_lock(&lock);
+    _ = running.remove(job.id);
+    c.g_mutex_unlock(&lock);
+}
+
+fn runJob(job: *Job) void {
+    const a = std.heap.c_allocator;
+    const label = std.fmt.allocPrint(a, "Background task {s}", .{job.title}) catch "Background task";
+    var env_token: [33]u8 = .{0} ** 33;
+    var token_ok = false;
+    if (grant("", "")) |token| {
+        c.g_mutex_lock(&lock);
+        for (&grants) |*g| {
+            if (g.*) |*live| {
+                if (std.mem.eql(u8, &live.token, &token)) {
+                    const n = @min(label.len, OWNER_MAX);
+                    @memcpy(live.label[0..n], label[0..n]);
+                }
+            }
+        }
+        c.g_mutex_unlock(&lock);
+        @memcpy(env_token[0..32], &token);
+        token_ok = true;
+    }
+    const conv = std.fmt.allocPrintSentinel(a, "task-{s}", .{job.id}, 0) catch return finishJob(job, false, "");
+    const prompt = std.fmt.allocPrintSentinel(a, "{s}{s}", .{ job.prompt, BG_NOTE }, 0) catch return finishJob(job, false, "");
+    var env = c.g_get_environ();
+    if (token_ok) env = c.g_environ_setenv(env, "SINTY_AGENT_TOKEN", @ptrCast(&env_token), 1);
+    const argv = [_:null]?[*:0]const u8{ "sinty", "ask", "--conversation", conv.ptr, prompt.ptr };
+    var out: [*c]u8 = null;
+    var errs: [*c]u8 = null;
+    var st: c_int = 1;
+    const spawned = c.g_spawn_sync(null, @ptrCast(@constCast(&argv)), env, c.G_SPAWN_SEARCH_PATH, null, null, &out, &errs, &st, null) != 0;
+    const ok = spawned and c.g_spawn_check_wait_status(st, null) != 0;
+    const raw: []const u8 = if (ok and out != null) std.mem.span(out) else if (errs != null) std.mem.span(errs) else "";
+    finishJob(job, ok, std.mem.trim(u8, raw, " \r\n"));
+}
+
+fn launch(id: []const u8, title: []const u8, prompt: []const u8) void {
+    const a = std.heap.c_allocator;
+    c.g_mutex_lock(&lock);
+    if (running.contains(id) or stopped) {
+        c.g_mutex_unlock(&lock);
+        return;
+    }
+    const key = a.dupe(u8, id) catch {
+        c.g_mutex_unlock(&lock);
+        return;
+    };
+    running.put(a, key, {}) catch {};
+    c.g_mutex_unlock(&lock);
+    const job = a.create(Job) catch return;
+    job.* = .{ .id = key, .title = a.dupe(u8, title) catch key, .prompt = a.dupe(u8, prompt) catch key };
+    const t = std.Thread.spawn(.{}, runJob, .{job}) catch return;
+    t.detach();
+}
+
+fn onWatched(_: ?*c.GFileMonitor, _: ?*c.GFile, _: ?*c.GFile, event: c.GFileMonitorEvent, data: c.gpointer) callconv(.c) void {
+    if (event != c.G_FILE_MONITOR_EVENT_CREATED and event != c.G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT and event != c.G_FILE_MONITOR_EVENT_MOVED_IN) return;
+    c.g_mutex_lock(&lock);
+    const on = background and !stopped;
+    c.g_mutex_unlock(&lock);
+    if (!on) return;
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const id = std.mem.span(@as([*:0]const u8, @ptrCast(data)));
+    if (nowSec() - lastRun(lastRuns(a), id) < 120) return;
+    for (loadTasks(a)) |t| {
+        if (std.mem.eql(u8, t.id, id) and t.enabled) launch(t.id, t.title, t.prompt);
+    }
+}
+
+fn rewatch(a: std.mem.Allocator, list: []tasks.Task) void {
+    for (monitors.items) |m| {
+        _ = c.g_file_monitor_cancel(m);
+        c.g_object_unref(m);
+    }
+    monitors.clearRetainingCapacity();
+    const home = std.mem.span(c.g_get_home_dir());
+    for (list) |t| {
+        if (t.trigger != .files or !t.enabled) continue;
+        const path = std.heap.c_allocator.dupeZ(u8, tasks.expand(a, t.trigger.files, home)) catch continue;
+        const file = c.g_file_new_for_path(path.ptr);
+        defer c.g_object_unref(file);
+        const m = c.g_file_monitor_directory(file, c.G_FILE_MONITOR_WATCH_MOVES, null, null) orelse continue;
+        const idz = std.heap.c_allocator.dupeZ(u8, t.id) catch continue;
+        _ = c.g_signal_connect_data(m, "changed", @ptrCast(&onWatched), @ptrCast(idz.ptr), null, 0);
+        monitors.append(std.heap.c_allocator, m) catch {};
+    }
+}
+
+fn tick(_: c.gpointer) callconv(.c) c.gboolean {
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const list = loadTasks(a);
+    var stamp: i64 = 0;
+    const info = c.g_file_new_for_path(tasks_path.ptr);
+    defer c.g_object_unref(info);
+    if (c.g_file_query_info(info, "time::modified", c.G_FILE_QUERY_INFO_NONE, null, null)) |fi| {
+        stamp = @intCast(c.g_file_info_get_attribute_uint64(fi, "time::modified"));
+        c.g_object_unref(fi);
+    }
+    if (stamp != monitored_stamp) {
+        monitored_stamp = stamp;
+        rewatch(a, list);
+    }
+    c.g_mutex_lock(&lock);
+    const on = background and !stopped;
+    c.g_mutex_unlock(&lock);
+    if (!on) return 1;
+    const now = nowSec();
+    const local = c.g_date_time_new_now_local();
+    defer c.g_date_time_unref(local);
+    const minute: u32 = @intCast(c.g_date_time_get_hour(local) * 60 + c.g_date_time_get_minute(local));
+    const runs = lastRuns(a);
+    for (list) |t| {
+        if (tasks.due(t, now, minute, lastRun(runs, t.id), started)) launch(t.id, t.title, t.prompt);
+    }
+    for (tasks.parsePlans(a, fileOf(plans_path) orelse "[]")) |p| {
+        const n = tasks.nextStep(p) orelse continue;
+        if (resumed.contains(p.id)) continue;
+        resumed.put(std.heap.c_allocator, std.heap.c_allocator.dupe(u8, p.id) catch continue, {}) catch {};
+        const prompt = std.fmt.allocPrint(a, "Continue the plan {s} ({s}) from step {d}: {s}. Read plans_list first to see what earlier steps found, then mark each step with plan_step as you finish it.", .{ p.id, p.title, n, p.steps[n].text }) catch continue;
+        const id = std.fmt.allocPrint(a, "plan-{s}", .{p.id}) catch continue;
+        launch(id, p.title, prompt);
+    }
+    return 1;
+}
+
+fn startBackground(a: std.mem.Allocator, sdir: []const u8) void {
+    started = nowSec();
+    tasks_path = std.fmt.allocPrintSentinel(a, "{s}/sinty-agent/tasks.json", .{std.mem.span(c.g_get_user_config_dir())}, 0) catch return;
+    task_state_path = std.fmt.allocPrintSentinel(a, "{s}/tasks-state.json", .{sdir}, 0) catch return;
+    plans_path = std.fmt.allocPrintSentinel(a, "{s}/plans.json", .{sdir}, 0) catch return;
+    const every: c.guint = if (c.g_getenv("SINTY_AGENT_TICK") != null) 2 else 60;
+    _ = c.g_timeout_add_seconds(every, tick, null);
+}
 
 fn loadMode() void {
     var data: [*c]u8 = null;
@@ -1270,10 +1594,17 @@ fn loadMode() void {
     defer c.g_free(data);
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
-    const m = policy.fromConfig(arena.allocator(), std.mem.span(data)) orelse return;
+    const text = std.mem.span(data);
+    const bg = blk: {
+        const v = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), text, .{}) catch break :blk false;
+        if (v != .object) break :blk false;
+        const f = v.object.get("background") orelse break :blk false;
+        break :blk f == .bool and f.bool;
+    };
     c.g_mutex_lock(&lock);
     defer c.g_mutex_unlock(&lock);
-    mode = m;
+    background = bg;
+    mode = policy.fromConfig(arena.allocator(), text) orelse return;
 }
 
 fn onConfig(_: ?*c.GFileMonitor, _: ?*c.GFile, _: ?*c.GFile, event: c.GFileMonitorEvent, _: c.gpointer) callconv(.c) void {
@@ -1315,6 +1646,7 @@ pub fn main() void {
     t.detach();
 
     watchConfig(a);
+    startBackground(a, sdir);
     _ = c.g_bus_own_name_on_connection(bus, NAME, c.G_BUS_NAME_OWNER_FLAGS_NONE, onBus, onLost, null, null);
     c.g_main_loop_run(c.g_main_loop_new(null, 0));
 }

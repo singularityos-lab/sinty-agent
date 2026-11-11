@@ -199,6 +199,42 @@ pub const TOOLS = [_]Tool{
         .risk = .undoable,
     },
     .{
+        .name = "tasks_list",
+        .description = "List the background tasks the user keeps, with their trigger and their last run, and whether work in the background is on.",
+        .schema = NONE,
+        .risk = .read,
+    },
+    .{
+        .name = "task_save",
+        .description = "Create or replace a background task. task is JSON with id (letters, digits, - and _), title, prompt (what to do each time) and exactly one trigger: every_minutes (5 or more), at (HH:MM, once a day) or event (login, or files:PATH to run when files appear there). enabled defaults to true. It runs with the Sinty tools only and still asks before anything that cannot be undone.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"object\"}},\"required\":[\"task\"]}",
+        .risk = .undoable,
+    },
+    .{
+        .name = "task_delete",
+        .description = "Delete a background task by its id.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}",
+        .risk = .undoable,
+    },
+    .{
+        .name = "plans_list",
+        .description = "List the multi-step plans with each step, whether it is done and what it found. Active plans continue by themselves after a restart.",
+        .schema = NONE,
+        .risk = .read,
+    },
+    .{
+        .name = "plan_save",
+        .description = "Create or replace a multi-step plan so the work survives a restart. plan is JSON with id, title, status (active, paused or done) and steps, each with text.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"plan\":{\"type\":\"object\"}},\"required\":[\"plan\"]}",
+        .risk = .undoable,
+    },
+    .{
+        .name = "plan_step",
+        .description = "Mark one step of a plan done, counting from 0, with what it found. status can pause or end the plan. Answers with the next step.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"step\":{\"type\":\"integer\"},\"result\":{\"type\":\"string\"},\"status\":{\"type\":\"string\",\"enum\":[\"active\",\"paused\",\"done\"]}},\"required\":[\"id\",\"step\"]}",
+        .risk = .undoable,
+    },
+    .{
         .name = "agent_status",
         .description = "Show the current mode and whether the agent is stopped.",
         .schema = NONE,
