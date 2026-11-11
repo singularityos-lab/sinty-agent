@@ -127,6 +127,12 @@ pub const TOOLS = [_]Tool{
         .risk = .read,
     },
     .{
+        .name = "settings_switch",
+        .description = "Turn a switch row of System Settings on or off, by its page and title from settings_pages, exactly as the user would flip it. Answers with the state before and after. Rows that are not switches are changed by opening their page.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"on\":{\"type\":\"boolean\"}},\"required\":[\"page\",\"title\",\"on\"]}",
+        .risk = .undoable,
+    },
+    .{
         .name = "settings_open",
         .description = "Open System Settings on a page, optionally scrolled to a row by its title, so the user sees it and ui_tree and ui_act can change it. Changes that need system privileges are approved by the system exactly as when the user does them by hand.",
         .schema = "{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"string\"},\"row\":{\"type\":\"string\"}},\"required\":[\"page\"]}",

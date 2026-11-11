@@ -716,7 +716,7 @@ fn shellIndex(a: std.mem.Allocator, method: [*:0]const u8, params: ?*c.GVariant,
     return a.dupe(u8, std.mem.span(s)) catch null;
 }
 
-const SettingRow = struct { page: []const u8 = "", page_title: []const u8 = "", title: []const u8 = "", subtitle: []const u8 = "", group: []const u8 = "", kind: []const u8 = "" };
+const SettingRow = struct { page: []const u8 = "", page_title: []const u8 = "", title: []const u8 = "", subtitle: []const u8 = "", group: []const u8 = "", kind: []const u8 = "", state: []const u8 = "" };
 
 pub fn rowMatches(a: std.mem.Allocator, r: SettingRow, query: []const u8) bool {
     const hay = std.ascii.allocLowerString(a, std.fmt.allocPrint(a, "{s} {s} {s} {s} {s}", .{ r.page, r.page_title, r.title, r.subtitle, r.group }) catch return false) catch return false;
@@ -755,6 +755,27 @@ fn settingsPages(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     }
     const text = std.json.Stringify.valueAlloc(a, .{ .pages = pages.items, .hint = "Pass a query to find rows, or open a page with settings_open." }, .{}) catch return fail("out of memory");
     return .{ .text = text };
+}
+
+fn settingsSwitch(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const page = str(args, "page") orelse return fail("missing page");
+    const title = str(args, "title") orelse return fail("missing title");
+    const ov = if (args == .object) args.object.get("on") else null;
+    if (ov == null or ov.? != .bool) return fail("on must be true or false");
+    const pz = a.dupeZ(u8, page) catch return fail("out of memory");
+    const tz = a.dupeZ(u8, title) catch return fail("out of memory");
+    var err: [*c]c.GError = null;
+    const r = c.g_dbus_connection_call_sync(bus, "dev.sinty.desktop", "/dev/sinty/Shell/SettingsIndex", "dev.sinty.Shell.SettingsIndex", "SetSwitch", c.g_variant_new("(ssb)", pz.ptr, tz.ptr, @as(c.gboolean, if (ov.?.bool) 1 else 0)), vt("(s)"), c.G_DBUS_CALL_FLAGS_NONE, 15000, null, &err);
+    if (r == null) {
+        defer c.g_clear_error(&err);
+        var msg = std.mem.span(err.*.message);
+        if (std.mem.lastIndexOf(u8, msg, ": ")) |i| msg = msg[i + 2 ..];
+        return fail(a.dupe(u8, msg) catch "the switch could not be changed");
+    }
+    defer c.g_variant_unref(r);
+    var s: [*c]const u8 = null;
+    c.g_variant_get(r, "(&s)", &s);
+    return .{ .text = a.dupe(u8, std.mem.span(s)) catch "" };
 }
 
 fn settingsOpen(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
@@ -832,6 +853,7 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "host_run")) return hostRun(a, args);
     if (std.mem.eql(u8, name, "settings_pages")) return settingsPages(a, args);
     if (std.mem.eql(u8, name, "settings_open")) return settingsOpen(a, args);
+    if (std.mem.eql(u8, name, "settings_switch")) return settingsSwitch(a, args);
     if (std.mem.eql(u8, name, "windows_list")) return wl.windows(a);
     if (std.mem.eql(u8, name, "window_set")) return wl.windowSet(a, args);
     if (std.mem.eql(u8, name, "outputs_list")) return wl.outputs(a);
@@ -863,6 +885,14 @@ fn record(a: std.mem.Allocator, name: []const u8, args: std.json.Value, result: 
         ch.key = str(args, "key") orelse return 0;
         ch.path = str(args, "path") orelse "";
         ch.summary = std.fmt.allocPrint(a, "{s} {s} to {s}", .{ ch.schema, ch.key, str(args, "value") orelse "" }) catch name;
+    } else if (std.mem.eql(u8, name, "settings_switch")) {
+        const R = struct { was: bool, now: bool };
+        const got = std.json.parseFromSliceLeaky(R, a, result, .{ .ignore_unknown_fields = true }) catch return 0;
+        if (got.was == got.now) return 0;
+        const page = str(args, "page") orelse return 0;
+        const title = str(args, "title") orelse return 0;
+        ch.undo = std.fmt.allocPrint(a, "Call settings_switch with page \"{s}\", title \"{s}\" and on {s}.", .{ page, title, if (got.was) "true" else "false" }) catch return 0;
+        ch.summary = std.fmt.allocPrint(a, "turned {s} {s} in Settings", .{ if (got.now) "on" else "off", title }) catch name;
     } else if (std.mem.eql(u8, name, "profile_activate")) {
         ch.kind = .profile;
         ch.undo = "profile_deactivate";
