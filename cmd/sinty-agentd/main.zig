@@ -42,6 +42,8 @@ const XML =
     \\    <signal name="ActionDone"><arg name="tool" type="s"/><arg name="outcome" type="s"/></signal>
     \\    <signal name="ConfirmClosed"><arg name="id" type="u"/></signal>
     \\    <signal name="RemoteChanged"><arg name="device" type="s"/></signal>
+    \\    <signal name="Working"><arg name="who" type="s"/><arg name="tool" type="s"/></signal>
+    \\    <signal name="PointerAt"><arg name="x" type="i"/><arg name="y" type="i"/><arg name="who" type="s"/></signal>
     \\    <signal name="ChangeRecorded"><arg name="id" type="u"/><arg name="app" type="s"/><arg name="summary" type="s"/></signal>
     \\    <signal name="IntentDone"><arg name="app" type="s"/><arg name="intent" type="s"/><arg name="args" type="s"/><arg name="result" type="s"/></signal>
     \\  </interface>
@@ -830,6 +832,11 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
         receipt(a, name, args, "refuse", o, 0);
         return o;
     };
+    if (!harmless(name)) {
+        const wz = a.dupeZ(u8, session.peer) catch "";
+        const tz0 = a.dupeZ(u8, name) catch "";
+        emit("Working", c.g_variant_new("(ss)", wz.ptr, tz0.ptr).?);
+    }
     c.g_mutex_lock(&lock);
     const verdict = if (session.kind == .trusted)
         policy.decide(mode, risk, session.tainted, stopped)
@@ -852,6 +859,11 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
             }
         },
         .run => o = run(a, name, args),
+    }
+    if (std.mem.eql(u8, name, "pointer") and wl.pointer_moved) {
+        wl.pointer_moved = false;
+        const wz = a.dupeZ(u8, session.peer) catch "";
+        emit("PointerAt", c.g_variant_new("(iis)", @as(i32, @intCast(std.math.clamp(wl.pointer_x, -100000, 100000))), @as(i32, @intCast(std.math.clamp(wl.pointer_y, -100000, 100000))), wz.ptr).?);
     }
     var change: u32 = 0;
     if (!o.failed and !std.mem.eql(u8, label, "refuse") and !std.mem.eql(u8, label, "denied")) change = record(a, name, args, o.text, before);

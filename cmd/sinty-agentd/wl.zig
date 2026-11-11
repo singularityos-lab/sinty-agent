@@ -656,6 +656,10 @@ fn consentOpen() bool {
     return false;
 }
 
+pub var pointer_x: i64 = 0;
+pub var pointer_y: i64 = 0;
+pub var pointer_moved = false;
+
 pub fn pointer(args: std.json.Value) mcp.Outcome {
     const action = text(args, "action") orelse return fail("missing action");
     if (!enter()) return fail(NO_COMPOSITOR);
@@ -677,6 +681,9 @@ pub fn pointer(args: std.json.Value) mcp.Outcome {
     const x = (int(args, "x") orelse return fail("missing x")) + ox;
     const y = (int(args, "y") orelse return fail("missing y")) + oy;
     if (moveTo(x, y)) |e| return fail(e);
+    pointer_x = x;
+    pointer_y = y;
+    pointer_moved = true;
     settle();
     const eq = std.mem.eql;
     if (eq(u8, action, "move")) {
@@ -711,6 +718,8 @@ pub fn pointer(args: std.json.Value) mcp.Outcome {
             settle();
         }
         press(BTN_LEFT, false);
+        pointer_x = tx;
+        pointer_y = ty;
     } else return fail("unknown action");
     settle();
     return .{ .text = "done" };
