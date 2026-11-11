@@ -32,6 +32,9 @@ pub fn main(init: std.process.Init.Minimal) void {
     const checking = std.mem.eql(u8, cmd, "check");
     if (!checking and !std.mem.eql(u8, cmd, "ask")) usage();
     var cfg = provider.Config.load(a);
+    const configured = cfg.provider;
+    var model_given = false;
+    var endpoint_given = false;
     var words: std.ArrayList(u8) = .empty;
     var conversation: []const u8 = "";
     while (it.next()) |arg| {
@@ -39,8 +42,10 @@ pub fn main(init: std.process.Init.Minimal) void {
             cfg.provider = it.next() orelse usage();
         } else if (std.mem.eql(u8, arg, "--model")) {
             cfg.model = it.next() orelse usage();
+            model_given = true;
         } else if (std.mem.eql(u8, arg, "--endpoint")) {
             cfg.endpoint = it.next() orelse usage();
+            endpoint_given = true;
         } else if (std.mem.eql(u8, arg, "--conversation")) {
             conversation = it.next() orelse usage();
             if (!memory.valid(conversation)) usage();
@@ -48,6 +53,10 @@ pub fn main(init: std.process.Init.Minimal) void {
             if (words.items.len > 0) words.append(a, ' ') catch fatal("out of memory", .{});
             words.appendSlice(a, arg) catch fatal("out of memory", .{});
         }
+    }
+    if (!model_given and !std.mem.eql(u8, cfg.provider, configured)) {
+        cfg.model = "";
+        if (!endpoint_given) cfg.endpoint = "";
     }
     if (checking) {
         if (words.items.len > 0) usage();

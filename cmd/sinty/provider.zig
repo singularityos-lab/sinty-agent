@@ -318,8 +318,67 @@ pub fn ollama(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]con
     return ollamaChat(a, cfg, prompt, if (cfg.endpoint.len > 0) cfg.endpoint else "https://ollama.com", try lookupKey(a, "ollama"));
 }
 
+pub const LOCAL_ENDPOINT = "http://127.0.0.1:11435/v1";
+
 pub fn localModel(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
-    return ollamaChat(a, cfg, prompt, if (cfg.endpoint.len > 0) cfg.endpoint else "http://127.0.0.1:11434", "");
+    return openAiChat(a, cfg, prompt, if (cfg.endpoint.len > 0) cfg.endpoint else LOCAL_ENDPOINT);
+}
+
+fn openAiChat(a: std.mem.Allocator, cfg: Config, prompt: []const u8, base: []const u8) Error![]const u8 {
+    var mcp: ?Mcp = if (cfg.tools) try Mcp.open(a) else null;
+    var tools = arr(a);
+    if (mcp) |*mc| for (try mc.tools()) |t| {
+        var f = obj(a);
+        try f.put(a, "name", t.object.get("name") orelse continue);
+        try f.put(a, "description", t.object.get("description") orelse str(""));
+        try f.put(a, "parameters", t.object.get("inputSchema") orelse continue);
+        var d = obj(a);
+        try d.put(a, "type", str("function"));
+        try d.put(a, "function", .{ .object = f });
+        try tools.append(.{ .object = d });
+    };
+    var messages = arr(a);
+    var sys = obj(a);
+    try sys.put(a, "role", str("system"));
+    try sys.put(a, "content", str(SYSTEM));
+    try messages.append(.{ .object = sys });
+    var first = obj(a);
+    try first.put(a, "role", str("user"));
+    try first.put(a, "content", str(prompt));
+    try messages.append(.{ .object = first });
+    const trimmed = std.mem.trimEnd(u8, base, "/");
+    const url = try std.fmt.allocPrint(a, "{s}/chat/completions", .{trimmed});
+    var turn: usize = 0;
+    while (turn < MAX_TURNS) : (turn += 1) {
+        var req = obj(a);
+        if (cfg.model.len > 0) try req.put(a, "model", str(cfg.model));
+        try req.put(a, "stream", .{ .bool = false });
+        if (tools.items.len > 0) try req.put(a, "tools", .{ .array = tools });
+        try req.put(a, "messages", .{ .array = messages });
+        const body = try json.Stringify.valueAlloc(a, json.Value{ .object = req }, .{});
+        const reply = try post(a, url, body, &.{});
+        if (reply != .object) return error.BadAnswer;
+        const choices = reply.object.get("choices") orelse return error.BadAnswer;
+        if (choices != .array or choices.array.items.len == 0) return error.BadAnswer;
+        const m = (if (choices.array.items[0] == .object) choices.array.items[0].object.get("message") else null) orelse return error.BadAnswer;
+        if (m != .object) return error.BadAnswer;
+        const calls = m.object.get("tool_calls");
+        if (calls == null or calls.? != .array or calls.?.array.items.len == 0) return field(m, "content") orelse "";
+        try messages.append(m);
+        for (calls.?.array.items) |call| {
+            const f = (if (call == .object) call.object.get("function") else null) orelse return error.BadAnswer;
+            const raw = field(f, "arguments") orelse "{}";
+            const args = json.parseFromSliceLeaky(json.Value, a, raw, .{}) catch json.Value{ .object = obj(a) };
+            const mc = if (mcp) |*open| open else return error.BadAnswer;
+            const out = try mc.tool(field(f, "name") orelse return error.BadAnswer, args);
+            var r = obj(a);
+            try r.put(a, "role", str("tool"));
+            try r.put(a, "tool_call_id", call.object.get("id") orelse str(""));
+            try r.put(a, "content", str(out));
+            try messages.append(.{ .object = r });
+        }
+    }
+    return error.TooManyTurns;
 }
 
 fn ollamaChat(a: std.mem.Allocator, cfg: Config, prompt: []const u8, base: []const u8, key: []const u8) Error![]const u8 {
