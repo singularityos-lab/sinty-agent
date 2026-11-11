@@ -74,6 +74,7 @@ fn call(method: [*:0]const u8, params: ?*c.GVariant) ?*c.GVariant {
 }
 
 pub fn main(init: std.process.Init.Minimal) void {
+    if (std.c.getuid() == 0 or std.c.geteuid() == 0) fatal("Sinty AI never runs as root", .{});
     var it = init.args.iterate();
     _ = it.next();
     const cmd = it.next() orelse usage();

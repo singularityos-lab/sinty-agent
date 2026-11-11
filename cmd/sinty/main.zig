@@ -22,6 +22,7 @@ fn storeKey(p: []const u8) void {
 }
 
 pub fn main(init: std.process.Init.Minimal) void {
+    if (std.c.getuid() == 0 or std.c.geteuid() == 0) fatal("Sinty AI never runs as root", .{});
     const a = std.heap.c_allocator;
     var it = init.args.iterate();
     _ = it.next();

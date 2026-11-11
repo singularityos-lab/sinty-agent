@@ -1851,6 +1851,7 @@ fn onLost(_: ?*c.GDBusConnection, _: [*c]const u8, _: c.gpointer) callconv(.c) v
 }
 
 pub fn main() void {
+    if (std.c.getuid() == 0 or std.c.geteuid() == 0) fatal("Sinty AI never runs as root", .{});
     const a = std.heap.c_allocator;
     c.g_mutex_init(&lock);
     c.g_mutex_init(&jlock);
