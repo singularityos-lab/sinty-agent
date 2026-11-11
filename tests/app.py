@@ -131,10 +131,46 @@ def calendar():
     check("bad date refused", invoke("calendar_list", **{"from": "x", "to": "y"})[0])
     check("show day", not invoke("calendar_show_day", date="2026-11-05T00:00:00")[0])
 
+def passwords():
+    here = os.path.dirname(os.path.abspath(__file__))
+    clip = home + "/clipboard.jsonl"
+    subprocess.Popen([sys.executable, here + "/fake_secrets.py"], env=env)
+    subprocess.Popen([sys.executable, here + "/fake_shell.py", clip], env=env)
+    time.sleep(1.5)
+    conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    def owned():
+        return conn.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner",
+                              GLib.Variant("(s)", (APP,)), GLib.VariantType("(b)"), 0, 3000, None).unpack()[0]
+    deadline = time.time() + 20
+    while owned() and time.time() < deadline:
+        time.sleep(0.5)
+    subprocess.Popen([EXE, "--gapplication-service"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    while not owned() and time.time() < deadline + 10:
+        time.sleep(0.3)
+    time.sleep(1)
+    e, t = invoke("passwords_search")
+    check("search lists logins", not e and "Bank" in t and "mail.example.org" in t, t)
+    check("search hides passwords", "SECRET-" not in t, t)
+    bank = [p["id"] for p in json.loads(t)["passwords"] if p["title"] == "Bank"][0]
+    e, t = invoke("passwords_copy", id=bank)
+    check("copy answers", not e and '"copied":"password"' in t, t)
+    check("copy hides the password from the model", "SECRET-" not in t and "private" not in t, t)
+    time.sleep(0.5)
+    got = [json.loads(l) for l in open(clip)] if os.path.exists(clip) else []
+    check("the shell got the password to copy", len(got) == 1 and got[0]["text"] == "SECRET-Zq8#vL2!mN9x$Rt4pW" and got[0]["sensitive"] and got[0]["clear_after"] == 30, got)
+    e, t = invoke("passwords_audit")
+    check("audit finds the reused password", not e and "Example Mail" in t and "Example Shop" in t and "SECRET-" not in t, t)
+    e, t = invoke("passwords_add", title="Forum", url="https://forum.example.org")
+    check("add answers without the password", not e and "Forum" in t and "private" not in t, t)
+    got = [json.loads(l) for l in open(clip)]
+    check("the new password went to the clipboard", len(got) == 2 and len(got[1]["text"]) == 20, got)
+    leaked = [os.path.join(r, f) for r, _, fs in os.walk(home) for f in fs if f != "clipboard.jsonl" and "SECRET-" in open(os.path.join(r, f), errors="ignore").read()]
+    check("no password in receipts or logs", not leaked, leaked)
+
 def tool_mode(m):
     subprocess.run([BIN + "/sinty-agent", "mode", m], capture_output=True, timeout=10)
 
-{"dev.sinty.notes": notes, "dev.sinty.tasks": tasks, "dev.sinty.camera": camera, "dev.sinty.files": files, "dev.sinty.edit": edit, "dev.sinty.browser": browser, "dev.sinty.write": write, "dev.sinty.calendar": calendar}[APP]()
+{"dev.sinty.notes": notes, "dev.sinty.tasks": tasks, "dev.sinty.camera": camera, "dev.sinty.files": files, "dev.sinty.edit": edit, "dev.sinty.browser": browser, "dev.sinty.write": write, "dev.sinty.calendar": calendar, "dev.sinty.passwords": passwords}[APP]()
 check("context", not tool("app_context", app=APP)[0])
 check("unknown intent fails", invoke("nope")[0])
 tool_mode("plan")

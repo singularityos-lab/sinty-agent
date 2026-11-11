@@ -713,7 +713,9 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
     }
     if (!o.failed and (std.mem.eql(u8, name, "app_context") or std.mem.eql(u8, name, "conversations") or std.mem.eql(u8, name, "screen_capture") or std.mem.eql(u8, name, "windows_list") or std.mem.eql(u8, name, "ui_tree") or std.mem.eql(u8, name, "shell_run") or std.mem.eql(u8, name, "dbus_call") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
     if (!o.failed and std.mem.eql(u8, name, "app_invoke")) {
-        intentDone(a, session, args, o.text);
+        const clip = takeClipboard(a, o.text);
+        if (clip.copy) |cp| shellCopy(a, cp);
+        intentDone(a, session, args, clip.rest);
         o.text = withoutPrivate(a, o.text);
     }
     receipt(a, name, args, label, o);
@@ -721,6 +723,36 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
     const lz = a.dupeZ(u8, label) catch return o;
     emit("ActionDone", c.g_variant_new("(ss)", tz.ptr, lz.ptr).?);
     return o;
+}
+
+pub const Clip = struct { text: []const u8, sensitive: bool, clear_after: u32 };
+
+pub fn takeClipboard(a: std.mem.Allocator, text: []const u8) struct { rest: []const u8, copy: ?Clip } {
+    var parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return .{ .rest = text, .copy = null };
+    if (parsed.value != .object) return .{ .rest = text, .copy = null };
+    const priv = parsed.value.object.getPtr("private") orelse return .{ .rest = text, .copy = null };
+    if (priv.* != .object) return .{ .rest = text, .copy = null };
+    const clip = priv.object.get("clipboard") orelse return .{ .rest = text, .copy = null };
+    _ = priv.object.orderedRemove("clipboard");
+    const rest = std.json.Stringify.valueAlloc(a, parsed.value, .{}) catch "{}";
+    if (clip != .object) return .{ .rest = rest, .copy = null };
+    const t = clip.object.get("text") orelse return .{ .rest = rest, .copy = null };
+    if (t != .string) return .{ .rest = rest, .copy = null };
+    const sens = if (clip.object.get("sensitive")) |v| v == .bool and v.bool else false;
+    const clear: u32 = if (clip.object.get("clear_after")) |v| (if (v == .integer and v.integer > 0 and v.integer <= 300) @intCast(v.integer) else 0) else 0;
+    return .{ .rest = rest, .copy = .{ .text = t.string, .sensitive = sens, .clear_after = clear } };
+}
+
+fn shellCopy(a: std.mem.Allocator, clip: Clip) void {
+    const tz = a.dupeZ(u8, clip.text) catch return;
+    var err: [*c]c.GError = null;
+    const r = c.g_dbus_connection_call_sync(bus, "dev.sinty.desktop", "/dev/sinty/Shell/AgentClipboard", "dev.sinty.AgentClipboard1", "Copy", c.g_variant_new("(sbu)", tz.ptr, @as(c.gboolean, if (clip.sensitive) 1 else 0), @as(c.guint32, clip.clear_after)), null, c.G_DBUS_CALL_FLAGS_NONE, 5000, null, &err);
+    @memset(tz, 0);
+    if (r == null) {
+        c.g_clear_error(&err);
+        return;
+    }
+    c.g_variant_unref(r);
 }
 
 pub fn withoutPrivate(a: std.mem.Allocator, text: []const u8) []const u8 {
@@ -1152,6 +1184,22 @@ test "showArgs prints one readable line per argument" {
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"app\":\"dev.sinty.files\",\"n\":2}", .{});
     try std.testing.expectEqualStrings("\napp: dev.sinty.files\nn: 2", showArgs(a, parsed));
     try std.testing.expectEqualStrings("", showArgs(a, .null));
+}
+
+test "a clipboard handed back by an intent reaches neither the model nor the card" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "{\"copied\":\"password\",\"private\":{\"clipboard\":{\"text\":\"hunter2\",\"sensitive\":true,\"clear_after\":30}}}";
+    const clip = takeClipboard(a, raw);
+    try std.testing.expect(clip.copy != null);
+    try std.testing.expectEqualStrings("hunter2", clip.copy.?.text);
+    try std.testing.expect(clip.copy.?.sensitive);
+    try std.testing.expectEqual(@as(u32, 30), clip.copy.?.clear_after);
+    try std.testing.expect(std.mem.indexOf(u8, clip.rest, "hunter2") == null);
+    try std.testing.expect(std.mem.indexOf(u8, withoutPrivate(a, clip.rest), "hunter2") == null);
+    try std.testing.expect(std.mem.indexOf(u8, withoutPrivate(a, raw), "hunter2") == null);
+    try std.testing.expect(takeClipboard(a, "{\"a\":1}").copy == null);
 }
 
 test "private intent fields reach the card but not the model" {
