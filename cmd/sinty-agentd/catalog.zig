@@ -127,6 +127,18 @@ pub const TOOLS = [_]Tool{
         .risk = .read,
     },
     .{
+        .name = "settings_row",
+        .description = "Describe the control of one System Settings row, by page and title from settings_pages: switch, number or slider with its range, choice with its options, text, password, or a page to open. Answers with the current value.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"}},\"required\":[\"page\",\"title\"]}",
+        .risk = .read,
+    },
+    .{
+        .name = "settings_row_set",
+        .description = "Set the control of one System Settings row as the user would: true or false for a switch, a number inside the range for numbers and sliders, one of the listed options for a choice, text for a text field. Passwords are never set. Answers with the value before and after; the change can be undone.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"value\":{}},\"required\":[\"page\",\"title\",\"value\"]}",
+        .risk = .undoable,
+    },
+    .{
         .name = "settings_switch",
         .description = "Turn a switch row of System Settings on or off, by its page and title from settings_pages, exactly as the user would flip it. Answers with the state before and after. Rows that are not switches are changed by opening their page.",
         .schema = "{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"on\":{\"type\":\"boolean\"}},\"required\":[\"page\",\"title\",\"on\"]}",

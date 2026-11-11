@@ -757,6 +757,42 @@ fn settingsPages(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     return .{ .text = text };
 }
 
+fn shellIndexCall(a: std.mem.Allocator, method: [*:0]const u8, params: ?*c.GVariant) mcp.Outcome {
+    var err: [*c]c.GError = null;
+    const r = c.g_dbus_connection_call_sync(bus, "dev.sinty.desktop", "/dev/sinty/Shell/SettingsIndex", "dev.sinty.Shell.SettingsIndex", method, params, vt("(s)"), c.G_DBUS_CALL_FLAGS_NONE, 15000, null, &err);
+    if (r == null) {
+        defer c.g_clear_error(&err);
+        var msg = std.mem.span(err.*.message);
+        if (std.mem.lastIndexOf(u8, msg, ": ")) |i| msg = msg[i + 2 ..];
+        return fail(a.dupe(u8, msg) catch "Settings did not answer");
+    }
+    defer c.g_variant_unref(r);
+    var s: [*c]const u8 = null;
+    c.g_variant_get(r, "(&s)", &s);
+    return .{ .text = a.dupe(u8, std.mem.span(s)) catch "" };
+}
+
+fn settingsRow(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const pz = a.dupeZ(u8, str(args, "page") orelse return fail("missing page")) catch return fail("out of memory");
+    const tz = a.dupeZ(u8, str(args, "title") orelse return fail("missing title")) catch return fail("out of memory");
+    return shellIndexCall(a, "Describe", c.g_variant_new("(ss)", pz.ptr, tz.ptr));
+}
+
+fn settingsRowSet(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const pz = a.dupeZ(u8, str(args, "page") orelse return fail("missing page")) catch return fail("out of memory");
+    const tz = a.dupeZ(u8, str(args, "title") orelse return fail("missing title")) catch return fail("out of memory");
+    const v = if (args == .object) args.object.get("value") else null;
+    const text: []const u8 = if (v == null) return fail("missing value") else switch (v.?) {
+        .string => |s| s,
+        .bool => |b| if (b) "true" else "false",
+        .integer => |i| std.fmt.allocPrint(a, "{d}", .{i}) catch return fail("out of memory"),
+        .float => |f| std.fmt.allocPrint(a, "{d}", .{f}) catch return fail("out of memory"),
+        else => return fail("value must be text, a number or true/false"),
+    };
+    const vz = a.dupeZ(u8, text) catch return fail("out of memory");
+    return shellIndexCall(a, "SetValue", c.g_variant_new("(sss)", pz.ptr, tz.ptr, vz.ptr));
+}
+
 fn settingsSwitch(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     const page = str(args, "page") orelse return fail("missing page");
     const title = str(args, "title") orelse return fail("missing title");
@@ -854,6 +890,8 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "settings_pages")) return settingsPages(a, args);
     if (std.mem.eql(u8, name, "settings_open")) return settingsOpen(a, args);
     if (std.mem.eql(u8, name, "settings_switch")) return settingsSwitch(a, args);
+    if (std.mem.eql(u8, name, "settings_row")) return settingsRow(a, args);
+    if (std.mem.eql(u8, name, "settings_row_set")) return settingsRowSet(a, args);
     if (std.mem.eql(u8, name, "windows_list")) return wl.windows(a);
     if (std.mem.eql(u8, name, "window_set")) return wl.windowSet(a, args);
     if (std.mem.eql(u8, name, "outputs_list")) return wl.outputs(a);
@@ -893,6 +931,16 @@ fn record(a: std.mem.Allocator, name: []const u8, args: std.json.Value, result: 
         const title = str(args, "title") orelse return 0;
         ch.undo = std.fmt.allocPrint(a, "Call settings_switch with page \"{s}\", title \"{s}\" and on {s}.", .{ page, title, if (got.was) "true" else "false" }) catch return 0;
         ch.summary = std.fmt.allocPrint(a, "turned {s} {s} in Settings", .{ if (got.now) "on" else "off", title }) catch name;
+    } else if (std.mem.eql(u8, name, "settings_row_set")) {
+        const R = struct { was: std.json.Value, now: std.json.Value };
+        const got = std.json.parseFromSliceLeaky(R, a, result, .{ .ignore_unknown_fields = true }) catch return 0;
+        const was = std.json.Stringify.valueAlloc(a, got.was, .{}) catch return 0;
+        const after = std.json.Stringify.valueAlloc(a, got.now, .{}) catch return 0;
+        if (std.mem.eql(u8, was, after)) return 0;
+        const page = str(args, "page") orelse return 0;
+        const title = str(args, "title") orelse return 0;
+        ch.undo = std.fmt.allocPrint(a, "Call settings_row_set with page \"{s}\", title \"{s}\" and value {s}.", .{ page, title, was }) catch return 0;
+        ch.summary = std.fmt.allocPrint(a, "set {s} to {s} in Settings", .{ title, after }) catch name;
     } else if (std.mem.eql(u8, name, "profile_activate")) {
         ch.kind = .profile;
         ch.undo = "profile_deactivate";
