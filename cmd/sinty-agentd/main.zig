@@ -702,6 +702,80 @@ test "privilege escalation is spotted in any position" {
     try std.testing.expect(!escalates("grep sudoers /etc/group"));
 }
 
+fn shellIndex(a: std.mem.Allocator, method: [*:0]const u8, params: ?*c.GVariant, ret: ?[*:0]const u8) ?[]const u8 {
+    var err: [*c]c.GError = null;
+    const r = c.g_dbus_connection_call_sync(bus, "dev.sinty.desktop", "/dev/sinty/Shell/SettingsIndex", "dev.sinty.Shell.SettingsIndex", method, params, if (ret) |t| vt(t) else null, c.G_DBUS_CALL_FLAGS_NONE, 15000, null, &err);
+    if (r == null) {
+        c.g_clear_error(&err);
+        return null;
+    }
+    defer c.g_variant_unref(r);
+    if (ret == null) return "";
+    var s: [*c]const u8 = null;
+    c.g_variant_get(r, "(&s)", &s);
+    return a.dupe(u8, std.mem.span(s)) catch null;
+}
+
+const SettingRow = struct { page: []const u8 = "", page_title: []const u8 = "", title: []const u8 = "", subtitle: []const u8 = "", group: []const u8 = "", kind: []const u8 = "" };
+
+pub fn rowMatches(a: std.mem.Allocator, r: SettingRow, query: []const u8) bool {
+    const hay = std.ascii.allocLowerString(a, std.fmt.allocPrint(a, "{s} {s} {s} {s} {s}", .{ r.page, r.page_title, r.title, r.subtitle, r.group }) catch return false) catch return false;
+    var it = std.mem.tokenizeAny(u8, query, " \t,");
+    var any = false;
+    while (it.next()) |w| {
+        any = true;
+        const lw = std.ascii.allocLowerString(a, w) catch return false;
+        if (std.mem.indexOf(u8, hay, lw) == null) return false;
+    }
+    return any;
+}
+
+fn settingsPages(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const raw = shellIndex(a, "Entries", null, "(s)") orelse return fail("the Settings index is not available: the Singularity shell is not running");
+    const rows = std.json.parseFromSliceLeaky([]SettingRow, a, raw, .{ .ignore_unknown_fields = true }) catch return fail("the Settings index could not be read");
+    if (str(args, "query")) |q| {
+        var hits: std.ArrayList(SettingRow) = .empty;
+        for (rows) |r| {
+            if (hits.items.len >= 60) break;
+            if (rowMatches(a, r, q)) hits.append(a, r) catch {};
+        }
+        const text = std.json.Stringify.valueAlloc(a, .{ .rows = hits.items, .hint = "Open one with settings_open, then read and change it with ui_tree and ui_act on the Settings window." }, .{}) catch return fail("out of memory");
+        return .{ .text = text };
+    }
+    const Page = struct { page: []const u8, title: []const u8, rows: u32 };
+    var pages: std.ArrayList(Page) = .empty;
+    outer: for (rows) |r| {
+        for (pages.items) |*p| {
+            if (std.mem.eql(u8, p.page, r.page)) {
+                p.rows += 1;
+                continue :outer;
+            }
+        }
+        pages.append(a, .{ .page = r.page, .title = r.page_title, .rows = 1 }) catch {};
+    }
+    const text = std.json.Stringify.valueAlloc(a, .{ .pages = pages.items, .hint = "Pass a query to find rows, or open a page with settings_open." }, .{}) catch return fail("out of memory");
+    return .{ .text = text };
+}
+
+fn settingsOpen(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
+    const page = str(args, "page") orelse return fail("missing page");
+    const row = str(args, "row") orelse "";
+    const pz = a.dupeZ(u8, page) catch return fail("out of memory");
+    const rz = a.dupeZ(u8, row) catch return fail("out of memory");
+    _ = shellIndex(a, "Open", c.g_variant_new("(ss)", pz.ptr, rz.ptr), null) orelse return fail("Settings could not be opened on that page");
+    return .{ .text = std.fmt.allocPrint(a, "Settings is open on {s}{s}{s}", .{ page, if (row.len > 0) ", row " else "", row }) catch "opened" };
+}
+
+test "a settings row matches every word of the query" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = SettingRow{ .page = "display", .page_title = "Displays", .title = "Night Light", .subtitle = "Warmer colours in the evening" };
+    try std.testing.expect(rowMatches(arena.allocator(), r, "night displays"));
+    try std.testing.expect(rowMatches(arena.allocator(), r, "WARMER"));
+    try std.testing.expect(!rowMatches(arena.allocator(), r, "night bluetooth"));
+    try std.testing.expect(!rowMatches(arena.allocator(), r, "  "));
+}
+
 fn riskOf(a: std.mem.Allocator, tool: *const catalog.Tool, args: std.json.Value) ?policy.Risk {
     if (!std.mem.eql(u8, tool.name, "app_invoke")) return tool.risk;
     const app = str(args, "app") orelse return .irreversible;
@@ -756,6 +830,8 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "dbus_call")) return dbusCall(a, args);
     if (std.mem.eql(u8, name, "shell_run")) return shellRun(a, args);
     if (std.mem.eql(u8, name, "host_run")) return hostRun(a, args);
+    if (std.mem.eql(u8, name, "settings_pages")) return settingsPages(a, args);
+    if (std.mem.eql(u8, name, "settings_open")) return settingsOpen(a, args);
     if (std.mem.eql(u8, name, "windows_list")) return wl.windows(a);
     if (std.mem.eql(u8, name, "window_set")) return wl.windowSet(a, args);
     if (std.mem.eql(u8, name, "outputs_list")) return wl.outputs(a);

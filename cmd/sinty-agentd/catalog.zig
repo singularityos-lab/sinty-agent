@@ -121,6 +121,18 @@ pub const TOOLS = [_]Tool{
         .risk = .irreversible,
     },
     .{
+        .name = "settings_pages",
+        .description = "Search System Settings the way a person would: every page and every row, with its title, subtitle and group. Without a query it lists the pages. Use it to find where something is set, for any area including the ones that need system privileges.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}",
+        .risk = .read,
+    },
+    .{
+        .name = "settings_open",
+        .description = "Open System Settings on a page, optionally scrolled to a row by its title, so the user sees it and ui_tree and ui_act can change it. Changes that need system privileges are approved by the system exactly as when the user does them by hand.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"string\"},\"row\":{\"type\":\"string\"}},\"required\":[\"page\"]}",
+        .risk = .undoable,
+    },
+    .{
         .name = "settings_schemas",
         .description = "List the settings schemas installed on the system. Optional query filters by text, such as dev.sinty.",
         .schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}",
