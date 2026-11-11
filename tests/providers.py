@@ -66,10 +66,35 @@ r = ask("--provider", "claude-code", "ciao")
 argv = open(home + "/claude.argv").read()
 check("claude code runs", "claude-ok" in r.stdout, r.stdout + r.stderr)
 check("claude code gets the server", '"sinty-agent"' in argv and "mcp__sinty" in argv, argv)
-script("codex", 'printf "%s\\n" "$@" > "$HOME/codex.argv"\necho codex-ok\n')
+open(fake + "/codex", "w").write("""#!/usr/bin/env python3
+import json, os, sys
+open(os.environ["HOME"] + "/codex.argv", "w").write("\\n".join(sys.argv[1:]))
+log = open(os.environ["HOME"] + "/codex.log", "w")
+def send(v):
+    sys.stdout.write(json.dumps(v) + "\\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    m = json.loads(line)
+    log.write(line)
+    log.flush()
+    if m.get("method") == "initialize":
+        send({"id": m["id"], "result": {}})
+    elif m.get("method") == "thread/start":
+        send({"id": m["id"], "result": {"thread": {"id": "th1"}}})
+    elif m.get("method") == "turn/start":
+        send({"id": 90, "method": "item/tool/call", "params": {"tool": "agent_status", "arguments": {}}})
+    elif m.get("id") == 90:
+        text = m["result"]["contentItems"][0]["text"]
+        send({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "codex-ok " + json.loads(text)["mode"]}}})
+        send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+""")
+os.chmod(fake + "/codex", 0o755)
 r = ask("--provider", "codex", "ciao")
 argv = open(home + "/codex.argv").read()
-check("codex runs", "codex-ok" in r.stdout and "mcp_servers.sinty.command" in argv, r.stdout + argv)
+sent = [json.loads(x) for x in open(home + "/codex.log")]
+start = next(x for x in sent if x.get("method") == "thread/start")["params"]
+check("codex runs app-server", r.stdout.strip() == "codex-ok ask" and argv.startswith("app-server"), r.stdout + r.stderr + argv)
+check("codex gets only Sinty tools, read-only, no approvals", start["sandbox"] == "read-only" and start["approvalPolicy"] == "never" and any(t["name"] == "app_invoke" for t in start["dynamicTools"]), start.keys())
 
 os.remove(fake + "/claude")
 script("dsh", 'shift\nexport PATH="$HOME/guest:$PATH"\nexec sh -c "$1"\n')

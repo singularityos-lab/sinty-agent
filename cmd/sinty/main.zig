@@ -1,6 +1,7 @@
 const std = @import("std");
 const provider = @import("provider.zig");
 const memory = @import("memory.zig");
+const acp = @import("acp.zig");
 const c = provider.c;
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
@@ -9,7 +10,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn usage() noreturn {
-    fatal("usage: sinty ask [--provider NAME] [--model NAME] [--endpoint URL] [--conversation ID] TEXT\n       sinty check [--provider NAME] [--model NAME] [--endpoint URL]\n       sinty key PROVIDER (reads the key from standard input)\nproviders: {s}", .{"local claude-code codex claude-api ollama"});
+    fatal("usage: sinty ask [--provider NAME] [--model NAME] [--endpoint URL] [--conversation ID] TEXT\n       sinty check [--provider NAME] [--model NAME] [--endpoint URL]\n       sinty key PROVIDER (reads the key from standard input)\n       sinty acp (an Agent Client Protocol agent on standard input and output)\nproviders: {s}", .{"local claude-code codex claude-api ollama"});
 }
 
 fn storeKey(p: []const u8) void {
@@ -27,6 +28,10 @@ pub fn main(init: std.process.Init.Minimal) void {
     const cmd = it.next() orelse usage();
     if (std.mem.eql(u8, cmd, "key")) {
         storeKey(it.next() orelse usage());
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "acp")) {
+        acp.serve(a, provider.Config.load(a));
         return;
     }
     const checking = std.mem.eql(u8, cmd, "check");
