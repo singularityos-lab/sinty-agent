@@ -6,6 +6,7 @@ pub const c = @cImport({
 
 const json = std.json;
 const MAX_TURNS = 120;
+const CODEX_OFF = [_][]const u8{ "shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external", "computer_use", "in_app_browser", "image_generation", "plugins", "view_image", "goals", "hooks", "skill_search", "tool_suggest", "worktrees" };
 const SYSTEM =
     \\You control this computer through tools. Act, do not describe what the user could do.
     \\Start from apps_list and app_intents when you do not know the id of an application or the name of an intent.
@@ -468,7 +469,8 @@ pub fn codex(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]cons
     const approve = "mcp_servers.sinty.default_tools_approval_mode=\"approve\"";
     const full = try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ SYSTEM, prompt });
     var words: std.ArrayList([]const u8) = .empty;
-    try words.appendSlice(a, &.{ "codex", "exec", "--skip-git-repo-check", "-c", server, "-c", args, "-c", env, "-c", approve });
+    try words.appendSlice(a, &.{ "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "-c", "web_search=\"disabled\"", "-c", server, "-c", args, "-c", env, "-c", approve });
+    for (CODEX_OFF) |f| try words.appendSlice(a, &.{ "--disable", f });
     if (cfg.model.len > 0) try words.appendSlice(a, &.{ "--model", cfg.model });
     try words.append(a, full);
     return spawnCli(a, words.items, !local);
