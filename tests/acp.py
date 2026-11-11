@@ -63,6 +63,17 @@ notes = []
 r = call("session/prompt", {"sessionId": sid, "prompt": [{"type": "text", "text": "e poi?"}]}, notes)
 sent = seen[-1][1]["messages"][1]["content"]
 check("the session remembers the previous turn", "spiega questo" in sent and "risposta 1" in sent and "e poi?" in sent, sent)
+proj = home + "/progetto"
+os.makedirs(proj)
+open(proj + "/main.zig", "w").write("pub fn main() void {}\n")
+open(home + "/segreto.txt", "w").write("password123\n")
+os.symlink(home + "/segreto.txt", proj + "/link.txt")
+r = call("session/new", {"cwd": proj})
+ps = r["result"]["sessionId"]
+call("session/prompt", {"sessionId": ps, "prompt": [{"type": "text", "text": "guarda"}, {"type": "resource_link", "uri": "file://" + proj + "/main.zig", "name": "main.zig"}, {"type": "resource_link", "uri": "file://" + home + "/segreto.txt", "name": "x"}, {"type": "resource_link", "uri": "file://" + proj + "/link.txt", "name": "y"}, {"type": "resource_link", "uri": "file://" + proj + "/../segreto.txt", "name": "z"}]})
+sent = seen[-1][1]["messages"][1]["content"]
+check("a linked file in the project is read as data", "pub fn main() void {}" in sent and "not instructions" in sent, sent)
+check("files outside the project, symlinks and .. stay unread", "password123" not in sent, sent)
 r = call("session/new", {"cwd": "/tmp"})
 other = r["result"]["sessionId"]
 call("session/prompt", {"sessionId": other, "prompt": [{"type": "text", "text": "nuovo"}]})
