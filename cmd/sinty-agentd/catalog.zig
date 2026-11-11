@@ -187,6 +187,18 @@ pub const TOOLS = [_]Tool{
         .risk = .undoable,
     },
     .{
+        .name = "changes_list",
+        .description = "List the recent changes made through Sinty AI, newest first, each with its id, what it changed and how it is undone.",
+        .schema = NONE,
+        .risk = .read,
+    },
+    .{
+        .name = "change_undo",
+        .description = "Undo a change by its id from changes_list, or the newest one when id is missing. Settings, profiles and app edits are put back and read back here; for the other changes it answers with the intent to run, which you must then run and read back.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}}}",
+        .risk = .undoable,
+    },
+    .{
         .name = "agent_status",
         .description = "Show the current mode and whether the agent is stopped.",
         .schema = NONE,

@@ -74,7 +74,7 @@ pub fn build(b: *std.Build) void {
     b.installFile("data/tour/78-sinty-ai-setup.slide", "share/singularity/tour/78-sinty-ai-setup.slide");
 
     const test_step = b.step("test", "run tests");
-    for ([_][]const u8{ "cmd/sinty-agentd/policy.zig", "cmd/sinty-agentd/mcp.zig", "cmd/sinty-agentd/catalog.zig" }) |root| {
+    for ([_][]const u8{ "cmd/sinty-agentd/policy.zig", "cmd/sinty-agentd/mcp.zig", "cmd/sinty-agentd/catalog.zig", "cmd/sinty-agentd/changes.zig" }) |root| {
         const mod = b.createModule(.{ .root_source_file = b.path(root), .target = target, .optimize = optimize });
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }

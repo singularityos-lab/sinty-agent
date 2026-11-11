@@ -9,6 +9,7 @@ const mcp = @import("mcp.zig");
 const wl = @import("wl.zig");
 const trust = @import("trust.zig");
 const a11y = @import("a11y.zig");
+const changes = @import("changes.zig");
 
 const EMPTY: [:0]const u8 = "";
 const BRIDGE = "/usr/libexec/sinty-agent-bridge";
@@ -34,10 +35,13 @@ const XML =
     \\    <method name="Resume"/>
     \\    <method name="Answer"><arg name="id" type="u" direction="in"/><arg name="allow" type="b" direction="in"/></method>
     \\    <method name="AllowSession"><arg name="id" type="u" direction="in"/></method>
+    \\    <method name="ListChanges"><arg name="changes" type="s" direction="out"/></method>
+    \\    <method name="Undo"><arg name="id" type="u" direction="in"/><arg name="result" type="s" direction="out"/></method>
     \\    <signal name="ConfirmRequested"><arg name="id" type="u"/><arg name="text" type="s"/></signal>
     \\    <signal name="ActionDone"><arg name="tool" type="s"/><arg name="outcome" type="s"/></signal>
     \\    <signal name="ConfirmClosed"><arg name="id" type="u"/></signal>
     \\    <signal name="RemoteChanged"><arg name="device" type="s"/></signal>
+    \\    <signal name="ChangeRecorded"><arg name="id" type="u"/><arg name="app" type="s"/><arg name="summary" type="s"/></signal>
     \\    <signal name="IntentDone"><arg name="app" type="s"/><arg name="intent" type="s"/><arg name="args" type="s"/><arg name="result" type="s"/></signal>
     \\  </interface>
     \\</node>
@@ -56,6 +60,8 @@ var waiting_risk: policy.Risk = .read;
 var answer: Answer = .none;
 var guest_open = false;
 var receipts_path: [:0]const u8 = "";
+var journal: changes.Journal = .{ .gpa = std.heap.c_allocator };
+var jlock: c.GMutex = undefined;
 
 const GRANT_US: i64 = 15 * 60 * 1000 * 1000;
 
@@ -101,13 +107,14 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
-fn receipt(a: std.mem.Allocator, tool: []const u8, args: std.json.Value, verdict: []const u8, o: mcp.Outcome) void {
+fn receipt(a: std.mem.Allocator, tool: []const u8, args: std.json.Value, verdict: []const u8, o: mcp.Outcome, change: u32) void {
     const line = std.json.Stringify.valueAlloc(a, .{
         .time = @divTrunc(c.g_get_real_time(), 1000000),
         .tool = tool,
         .args = args,
         .verdict = verdict,
         .failed = o.failed,
+        .change = change,
     }, .{}) catch return;
     const f = std.c.open(receipts_path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(c.mode_t, 0o600));
     if (f < 0) return;
@@ -651,6 +658,12 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     if (std.mem.eql(u8, name, "app_invoke")) return appInvoke(a, args);
     if (std.mem.eql(u8, name, "app_action")) return appAction(a, args);
     if (std.mem.eql(u8, name, "agent_status")) return .{ .text = status(a) };
+    if (std.mem.eql(u8, name, "changes_list")) return .{ .text = changesList(a) };
+    if (std.mem.eql(u8, name, "change_undo")) {
+        const v = if (args == .object) args.object.get("id") else null;
+        const id: u32 = if (v != null and v.? == .integer and v.?.integer > 0) @intCast(v.?.integer) else 0;
+        return undoChange(a, id);
+    }
     if (std.mem.eql(u8, name, "mail_compose")) return mailCompose(a, args);
     if (std.mem.eql(u8, name, "open_uri")) return openUri(a, args);
     if (std.mem.eql(u8, name, "conversations")) return conversations(a, args);
@@ -691,12 +704,122 @@ fn run(a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome
     return fail("unknown tool");
 }
 
+fn settingBefore(a: std.mem.Allocator, args: std.json.Value) ?[]const u8 {
+    const schema = str(args, "schema") orelse return null;
+    const key = str(args, "key") orelse return null;
+    return currentValue(a, schema, str(args, "path"), key);
+}
+
+fn record(a: std.mem.Allocator, name: []const u8, args: std.json.Value, result: []const u8, before: ?[]const u8) u32 {
+    const now = @divTrunc(c.g_get_real_time(), 1000000);
+    var ch = changes.Change{ .id = 0, .time = now, .tool = name, .summary = name, .kind = .instruction, .undo = "" };
+    if (std.mem.eql(u8, name, "settings_set")) {
+        const old = before orelse return 0;
+        ch.kind = .setting;
+        ch.undo = old;
+        ch.schema = str(args, "schema") orelse return 0;
+        ch.key = str(args, "key") orelse return 0;
+        ch.path = str(args, "path") orelse "";
+        ch.summary = std.fmt.allocPrint(a, "{s} {s} to {s}", .{ ch.schema, ch.key, str(args, "value") orelse "" }) catch name;
+    } else if (std.mem.eql(u8, name, "profile_activate")) {
+        ch.kind = .profile;
+        ch.undo = "profile_deactivate";
+        ch.summary = std.fmt.allocPrint(a, "turned on profile {s}", .{str(args, "id") orelse ""}) catch name;
+    } else if (std.mem.eql(u8, name, "app_invoke")) {
+        const u = changes.undoOf(a, result) orelse return 0;
+        ch.kind = changes.kindOf(u);
+        ch.undo = u;
+        ch.app = str(args, "app") orelse "";
+        ch.summary = str(args, "intent") orelse name;
+    } else return 0;
+    c.g_mutex_lock(&jlock);
+    const id = journal.add(ch);
+    c.g_mutex_unlock(&jlock);
+    const az = a.dupeZ(u8, ch.app) catch return id;
+    const sz = a.dupeZ(u8, ch.summary) catch return id;
+    emit("ChangeRecorded", c.g_variant_new("(uss)", id, az.ptr, sz.ptr).?);
+    return id;
+}
+
+fn changesList(a: std.mem.Allocator) []const u8 {
+    c.g_mutex_lock(&jlock);
+    defer c.g_mutex_unlock(&jlock);
+    return journal.listJson(a);
+}
+
+const Undone = struct { outcome: mcp.Outcome, instruction: ?[]const u8 = null, id: u32 = 0 };
+
+fn undoFind(a: std.mem.Allocator, id: u32) ?changes.Change {
+    c.g_mutex_lock(&jlock);
+    defer c.g_mutex_unlock(&jlock);
+    const ch = (if (id == 0) journal.last() else journal.get(id)) orelse return null;
+    if (ch.undone) return null;
+    var copy = ch.*;
+    inline for (.{ "tool", "app", "summary", "undo", "schema", "path", "key" }) |f| {
+        @field(copy, f) = a.dupe(u8, @field(ch.*, f)) catch "";
+    }
+    return copy;
+}
+
+fn markUndone(id: u32) void {
+    c.g_mutex_lock(&jlock);
+    defer c.g_mutex_unlock(&jlock);
+    if (journal.get(id)) |ch| ch.undone = true;
+}
+
+fn undoRun(a: std.mem.Allocator, id: u32) Undone {
+    const ch = undoFind(a, id) orelse return .{ .outcome = fail("nothing to undo with that id") };
+    switch (ch.kind) {
+        .setting => {
+            var obj: std.json.ObjectMap = .empty;
+            obj.put(a, "schema", .{ .string = ch.schema }) catch {};
+            obj.put(a, "key", .{ .string = ch.key }) catch {};
+            obj.put(a, "value", .{ .string = ch.undo }) catch {};
+            if (ch.path.len != 0) obj.put(a, "path", .{ .string = ch.path }) catch {};
+            const o = settingsSet(.{ .object = obj });
+            if (o.failed) return .{ .outcome = o, .id = ch.id };
+            const now = currentValue(a, ch.schema, if (ch.path.len != 0) ch.path else null, ch.key) orelse "";
+            if (!std.mem.eql(u8, now, ch.undo)) return .{ .outcome = fail("NOT DONE: the setting reads back a different value"), .id = ch.id };
+            markUndone(ch.id);
+            return .{ .outcome = .{ .text = std.fmt.allocPrint(a, "undone: {s} {s} is {s} again, read back", .{ ch.schema, ch.key, now }) catch "undone" }, .id = ch.id };
+        },
+        .profile => {
+            const o = profilesCall(a, "Deactivate", null, null);
+            if (!o.failed) markUndone(ch.id);
+            return .{ .outcome = if (o.failed) o else .{ .text = "undone: the profile is off and what it changed is back" }, .id = ch.id };
+        },
+        .ctrl_z => {
+            const app = a.dupeZ(u8, ch.app) catch return .{ .outcome = fail("out of memory") };
+            const listed = appCall(a, app, APP_IFACE, "Invoke", c.g_variant_new("(ss)", "app_actions", "{}"), "(s)");
+            const action = if (listed.failed) null else changes.undoAction(a, listed.text);
+            const name = action orelse return .{ .outcome = fail("the application offers no undo right now"), .id = ch.id };
+            const arg = std.json.Stringify.valueAlloc(a, .{ .name = name }, .{}) catch return .{ .outcome = fail("out of memory") };
+            const az = a.dupeZ(u8, arg) catch return .{ .outcome = fail("out of memory") };
+            const o = appCall(a, app, APP_IFACE, "Invoke", c.g_variant_new("(ss)", "app_action", az.ptr), "(s)");
+            if (!o.failed) markUndone(ch.id);
+            return .{ .outcome = o, .id = ch.id };
+        },
+        .instruction => {
+            markUndone(ch.id);
+            const text = std.fmt.allocPrint(a, "In {s}, undo change {d} ({s}): {s}. Read the result back before saying it is undone.", .{ ch.app, ch.id, ch.summary, ch.undo }) catch "";
+            return .{ .outcome = .{ .text = text }, .instruction = text, .id = ch.id };
+        },
+    }
+}
+
+fn undoChange(a: std.mem.Allocator, id: u32) mcp.Outcome {
+    const r = undoRun(a, id);
+    if (r.instruction) |t| return .{ .text = std.fmt.allocPrint(a, "This change is undone by an intent: do it now. {s}", .{t}) catch t };
+    return r.outcome;
+}
+
 fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.Value) mcp.Outcome {
     const session: *Session = @ptrCast(@alignCast(ctx));
     const tool = catalog.find(name) orelse return fail("unknown tool");
+    const before: ?[]const u8 = if (std.mem.eql(u8, name, "settings_set")) settingBefore(a, args) else null;
     const risk = riskOf(a, tool, args) orelse {
         const o = fail("this application has no such intent");
-        receipt(a, name, args, "refuse", o);
+        receipt(a, name, args, "refuse", o, 0);
         return o;
     };
     c.g_mutex_lock(&lock);
@@ -722,6 +845,8 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
         },
         .run => o = run(a, name, args),
     }
+    var change: u32 = 0;
+    if (!o.failed and !std.mem.eql(u8, label, "refuse") and !std.mem.eql(u8, label, "denied")) change = record(a, name, args, o.text, before);
     if (!o.failed and (std.mem.eql(u8, name, "app_context") or std.mem.eql(u8, name, "conversations") or std.mem.eql(u8, name, "screen_capture") or std.mem.eql(u8, name, "windows_list") or std.mem.eql(u8, name, "ui_tree") or std.mem.eql(u8, name, "shell_run") or std.mem.eql(u8, name, "dbus_call") or (std.mem.eql(u8, name, "app_invoke") and risk == .read))) session.tainted = true;
     if (!o.failed and std.mem.eql(u8, name, "app_invoke")) {
         const clip = takeClipboard(a, o.text);
@@ -729,7 +854,8 @@ fn call(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8, args: std.json.
         intentDone(a, session, args, clip.rest);
         o.text = withoutPrivate(a, o.text);
     }
-    receipt(a, name, args, label, o);
+    receipt(a, name, args, label, o, change);
+    if (change != 0) o.text = std.fmt.allocPrint(a, "{s}\nchange {d}: the user can undo it, or call change_undo with this id", .{ o.text, change }) catch o.text;
     const tz = a.dupeZ(u8, name) catch return o;
     const lz = a.dupeZ(u8, label) catch return o;
     emit("ActionDone", c.g_variant_new("(ss)", tz.ptr, lz.ptr).?);
@@ -985,6 +1111,17 @@ fn guestAsk(inv: ?*c.GDBusMethodInvocation) void {
     }
 }
 
+fn undoAsk(inv: ?*c.GDBusMethodInvocation, id: u32) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = undoRun(a, id);
+    const out = std.json.Stringify.valueAlloc(a, .{ .id = r.id, .done = !r.outcome.failed and r.instruction == null, .failed = r.outcome.failed, .text = r.outcome.text, .instruction = r.instruction }, .{}) catch "{}";
+    const z = a.dupeZ(u8, out) catch "{}";
+    receipt(a, "change_undo", .{ .integer = r.id }, "user", r.outcome, r.id);
+    c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(s)", z.ptr));
+}
+
 fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*c]const u8, method: [*c]const u8, params: ?*c.GVariant, inv: ?*c.GDBusMethodInvocation, _: c.gpointer) callconv(.c) void {
     const m = std.mem.span(method);
     if (std.mem.eql(u8, m, "GetStatus")) {
@@ -1030,6 +1167,26 @@ fn onMethod(_: ?*c.GDBusConnection, sender: [*c]const u8, _: [*c]const u8, _: [*
         };
         const z: [33]u8 = token ++ [_]u8{0};
         c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(s)", &z));
+        return;
+    }
+    if (std.mem.eql(u8, m, "ListChanges") or std.mem.eql(u8, m, "Undo")) {
+        if (!allowed) {
+            c.g_dbus_method_invocation_return_dbus_error(inv, DENIED, "only the desktop shell can do this");
+            return;
+        }
+        const a = std.heap.c_allocator;
+        if (std.mem.eql(u8, m, "ListChanges")) {
+            const z = a.dupeZ(u8, changesList(scratch.allocator())) catch "[]";
+            c.g_dbus_method_invocation_return_value(inv, c.g_variant_new("(s)", z.ptr));
+            return;
+        }
+        var id: c.guint32 = 0;
+        c.g_variant_get(params, "(u)", &id);
+        const t = std.Thread.spawn(.{}, undoAsk, .{ inv, id }) catch {
+            c.g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.Failed", "cannot undo now");
+            return;
+        };
+        t.detach();
         return;
     }
     const steering = std.mem.eql(u8, m, "Resume") or std.mem.eql(u8, m, "Answer") or std.mem.eql(u8, m, "AllowSession") or std.mem.eql(u8, m, "SetMode");
@@ -1138,6 +1295,7 @@ fn onLost(_: ?*c.GDBusConnection, _: [*c]const u8, _: c.gpointer) callconv(.c) v
 pub fn main() void {
     const a = std.heap.c_allocator;
     c.g_mutex_init(&lock);
+    c.g_mutex_init(&jlock);
     c.g_cond_init(&changed);
     var err: [*c]c.GError = null;
     bus = c.g_bus_get_sync(c.G_BUS_TYPE_SESSION, null, &err) orelse fatal("no session bus", .{});
