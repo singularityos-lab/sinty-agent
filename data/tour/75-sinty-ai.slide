@@ -1,7 +1,11 @@
 [Slide]
 Order=75
-Title=Ask Sinty AI
-Body=Press Super+A and say what you need. Sinty AI opens apps, writes notes and changes settings for you, and asks first before anything that cannot be undone. It stays off until you choose a model.
-Scene=assistant
-Action=settings:agent
-ActionLabel=Set Up Sinty AI
+Group=sinty-ai
+TryExec=sinty
+Title=Sinty AI Is Off
+Body=Without a model there is no AI on this computer, and nothing leaves it. Choose a model now, or skip and decide later in Settings.
+Scene=ai-off
+Action=slide:78-sinty-ai-setup
+ActionLabel=Choose a Model
+SecondaryAction=skip
+SecondaryActionLabel=Skip Sinty AI

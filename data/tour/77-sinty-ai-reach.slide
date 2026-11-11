@@ -1,0 +1,7 @@
+[Slide]
+Order=77
+Group=sinty-ai
+TryExec=sinty
+Title=It Works Where You Are
+Body=It arranges windows across your screens, finishes long tasks in the background and answers you from a paired phone.
+Scene=ai-reach

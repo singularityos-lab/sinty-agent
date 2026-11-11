@@ -9,7 +9,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn usage() noreturn {
-    fatal("usage: sinty ask [--provider NAME] [--model NAME] [--endpoint URL] [--conversation ID] TEXT\n       sinty key PROVIDER (reads the key from standard input)\nproviders: {s}", .{"local claude-code codex claude-api ollama"});
+    fatal("usage: sinty ask [--provider NAME] [--model NAME] [--endpoint URL] [--conversation ID] TEXT\n       sinty check [--provider NAME] [--model NAME] [--endpoint URL]\n       sinty key PROVIDER (reads the key from standard input)\nproviders: {s}", .{"local claude-code codex claude-api ollama"});
 }
 
 fn storeKey(p: []const u8) void {
@@ -29,7 +29,8 @@ pub fn main(init: std.process.Init.Minimal) void {
         storeKey(it.next() orelse usage());
         return;
     }
-    if (!std.mem.eql(u8, cmd, "ask")) usage();
+    const checking = std.mem.eql(u8, cmd, "check");
+    if (!checking and !std.mem.eql(u8, cmd, "ask")) usage();
     var cfg = provider.Config.load(a);
     var words: std.ArrayList(u8) = .empty;
     var conversation: []const u8 = "";
@@ -47,6 +48,16 @@ pub fn main(init: std.process.Init.Minimal) void {
             if (words.items.len > 0) words.append(a, ' ') catch fatal("out of memory", .{});
             words.appendSlice(a, arg) catch fatal("out of memory", .{});
         }
+    }
+    if (checking) {
+        if (words.items.len > 0) usage();
+        cfg.tools = false;
+        const reply = provider.run(a, cfg, "Reply with the single word ready.") catch |e| fatal("{s}", .{provider.describe(e)});
+        const trimmed = std.mem.trim(u8, reply, " \r\n\t");
+        if (trimmed.len == 0) fatal("the model sent an empty answer", .{});
+        _ = std.c.write(1, trimmed.ptr, trimmed.len);
+        _ = std.c.write(1, "\n", 1);
+        return;
     }
     if (words.items.len == 0) usage();
     const turns = if (conversation.len > 0) memory.load(a, conversation) else &.{};

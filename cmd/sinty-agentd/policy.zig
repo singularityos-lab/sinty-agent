@@ -11,6 +11,15 @@ pub const Mode = enum {
     }
 };
 
+pub fn fromConfig(a: std.mem.Allocator, text: []const u8) ?Mode {
+    const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}) catch return null;
+    if (v != .object) return null;
+    const f = v.object.get("mode") orelse return null;
+    if (f != .string) return null;
+    const m = Mode.parse(f.string) orelse return null;
+    return if (m == .autopilot) .auto else m;
+}
+
 pub const Risk = enum {
     read,
     undoable,
@@ -77,4 +86,16 @@ test "autopilot never asks" {
 
 test "an unknown risk counts as irreversible" {
     try std.testing.expectEqual(Risk.irreversible, Risk.parse("whatever"));
+}
+
+test "a mode in the configuration never reaches autopilot" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(?Mode, .plan), fromConfig(a, "{\"mode\":\"plan\"}"));
+    try std.testing.expectEqual(@as(?Mode, .auto), fromConfig(a, "{\"mode\":\"auto\"}"));
+    try std.testing.expectEqual(@as(?Mode, .auto), fromConfig(a, "{\"mode\":\"autopilot\"}"));
+    try std.testing.expectEqual(@as(?Mode, null), fromConfig(a, "{\"provider\":\"local\"}"));
+    try std.testing.expectEqual(@as(?Mode, null), fromConfig(a, "{\"mode\":\"root\"}"));
+    try std.testing.expectEqual(@as(?Mode, null), fromConfig(a, "not json"));
 }

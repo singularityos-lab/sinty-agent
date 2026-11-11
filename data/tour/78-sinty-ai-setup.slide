@@ -1,0 +1,7 @@
+[Slide]
+Order=78
+Group=sinty-ai
+TryExec=sinty
+Title=Choose a Model
+Body=Pick who answers and check that it works. Everything here can be changed later in Settings.
+Setup=agent

@@ -1,0 +1,7 @@
+[Slide]
+Order=76
+Group=sinty-ai
+TryExec=sinty
+Title=It Works in Your Apps
+Body=Press Super+A and say what you need. Sinty AI opens apps and writes, proposes how to tidy your mail and changes settings, and asks first before anything that cannot be undone.
+Scene=ai-desk

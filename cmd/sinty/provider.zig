@@ -52,6 +52,7 @@ pub const Config = struct {
     provider: []const u8 = "claude-code",
     model: []const u8 = "",
     endpoint: []const u8 = "",
+    tools: bool = true,
 
     pub fn load(a: std.mem.Allocator) Config {
         var cfg: Config = .{};
@@ -255,15 +256,15 @@ fn arr(a: std.mem.Allocator) json.Array {
 
 pub fn claudeApi(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
     const key = try lookupKey(a, "claude-api");
-    var mcp = try Mcp.open(a);
+    var mcp: ?Mcp = if (cfg.tools) try Mcp.open(a) else null;
     var tools = arr(a);
-    for (try mcp.tools()) |t| {
+    if (mcp) |*m| for (try m.tools()) |t| {
         var d = obj(a);
         try d.put(a, "name", t.object.get("name") orelse continue);
         try d.put(a, "description", t.object.get("description") orelse str(""));
         try d.put(a, "input_schema", t.object.get("inputSchema") orelse continue);
         try tools.append(.{ .object = d });
-    }
+    };
     var messages = arr(a);
     var first = obj(a);
     try first.put(a, "role", str("user"));
@@ -277,7 +278,7 @@ pub fn claudeApi(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]
         try req.put(a, "model", str(model));
         try req.put(a, "max_tokens", .{ .integer = 4096 });
         try req.put(a, "system", str(SYSTEM));
-        try req.put(a, "tools", .{ .array = tools });
+        if (tools.items.len > 0) try req.put(a, "tools", .{ .array = tools });
         try req.put(a, "messages", .{ .array = messages });
         const body = try json.Stringify.valueAlloc(a, json.Value{ .object = req }, .{});
         const reply = try post(a, url, body, &.{ .{ "x-api-key", key }, .{ "anthropic-version", "2023-06-01" } });
@@ -291,7 +292,8 @@ pub fn claudeApi(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]
             if (std.mem.eql(u8, kind, "text")) {
                 try said.appendSlice(a, field(block, "text") orelse "");
             } else if (std.mem.eql(u8, kind, "tool_use")) {
-                const out = try mcp.tool(field(block, "name") orelse return error.BadAnswer, block.object.get("input") orelse return error.BadAnswer);
+                const m = if (mcp) |*open| open else return error.BadAnswer;
+                const out = try m.tool(field(block, "name") orelse return error.BadAnswer, block.object.get("input") orelse return error.BadAnswer);
                 var r = obj(a);
                 try r.put(a, "type", str("tool_result"));
                 try r.put(a, "tool_use_id", block.object.get("id") orelse return error.BadAnswer);
@@ -322,9 +324,9 @@ pub fn localModel(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![
 
 fn ollamaChat(a: std.mem.Allocator, cfg: Config, prompt: []const u8, base: []const u8, key: []const u8) Error![]const u8 {
     if (cfg.model.len == 0) return error.NoModel;
-    var mcp = try Mcp.open(a);
+    var mcp: ?Mcp = if (cfg.tools) try Mcp.open(a) else null;
     var tools = arr(a);
-    for (try mcp.tools()) |t| {
+    if (mcp) |*mc| for (try mc.tools()) |t| {
         var f = obj(a);
         try f.put(a, "name", t.object.get("name") orelse continue);
         try f.put(a, "description", t.object.get("description") orelse str(""));
@@ -333,7 +335,7 @@ fn ollamaChat(a: std.mem.Allocator, cfg: Config, prompt: []const u8, base: []con
         try d.put(a, "type", str("function"));
         try d.put(a, "function", .{ .object = f });
         try tools.append(.{ .object = d });
-    }
+    };
     var messages = arr(a);
     var sys = obj(a);
     try sys.put(a, "role", str("system"));
@@ -351,7 +353,7 @@ fn ollamaChat(a: std.mem.Allocator, cfg: Config, prompt: []const u8, base: []con
         var req = obj(a);
         try req.put(a, "model", str(cfg.model));
         try req.put(a, "stream", .{ .bool = false });
-        try req.put(a, "tools", .{ .array = tools });
+        if (tools.items.len > 0) try req.put(a, "tools", .{ .array = tools });
         try req.put(a, "messages", .{ .array = messages });
         const body = try json.Stringify.valueAlloc(a, json.Value{ .object = req }, .{});
         const reply = try post(a, url, body, headers);
@@ -363,7 +365,8 @@ fn ollamaChat(a: std.mem.Allocator, cfg: Config, prompt: []const u8, base: []con
         try messages.append(m);
         for (calls.?.array.items) |call| {
             const f = (if (call == .object) call.object.get("function") else null) orelse return error.BadAnswer;
-            const out = try mcp.tool(field(f, "name") orelse return error.BadAnswer, f.object.get("arguments") orelse return error.BadAnswer);
+            const mc = if (mcp) |*open| open else return error.BadAnswer;
+            const out = try mc.tool(field(f, "name") orelse return error.BadAnswer, f.object.get("arguments") orelse return error.BadAnswer);
             var r = obj(a);
             try r.put(a, "role", str("tool"));
             try r.put(a, "content", str(out));
@@ -459,6 +462,12 @@ fn grantedToken() []const u8 {
 pub fn claudeCode(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
     const local = !dshHas(a, "claude");
     if (local and !onPath(a, "claude")) return error.NoProgram;
+    if (!cfg.tools) {
+        var plain: std.ArrayList([]const u8) = .empty;
+        try plain.appendSlice(a, &.{ "claude", "-p", prompt, "--strict-mcp-config", "--tools", "" });
+        if (cfg.model.len > 0) try plain.appendSlice(a, &.{ "--model", cfg.model });
+        return spawnCli(a, plain.items, !local);
+    }
     const m = try mcpCommand(a, !local);
     const conf = try json.Stringify.valueAlloc(a, .{ .mcpServers = .{ .sinty = .{ .command = m[0], .args = [_][]const u8{m[1]}, .env = .{ .SINTY_AGENT_TOKEN = grantedToken() } } } }, .{});
     var words: std.ArrayList([]const u8) = .empty;
@@ -470,6 +479,14 @@ pub fn claudeCode(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![
 pub fn codex(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![]const u8 {
     const local = !dshHas(a, "codex");
     if (local and !onPath(a, "codex")) return error.NoProgram;
+    if (!cfg.tools) {
+        var plain: std.ArrayList([]const u8) = .empty;
+        try plain.appendSlice(a, &.{ "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "-c", "web_search=\"disabled\"" });
+        for (CODEX_OFF) |f| try plain.appendSlice(a, &.{ "--disable", f });
+        if (cfg.model.len > 0) try plain.appendSlice(a, &.{ "--model", cfg.model });
+        try plain.append(a, prompt);
+        return spawnCli(a, plain.items, !local);
+    }
     const m = try mcpCommand(a, !local);
     const server = try std.fmt.allocPrint(a, "mcp_servers.sinty.command=\"{s}\"", .{m[0]});
     const args = try std.fmt.allocPrint(a, "mcp_servers.sinty.args=[\"{s}\"]", .{m[1]});

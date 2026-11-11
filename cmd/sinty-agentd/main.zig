@@ -1062,6 +1062,32 @@ fn onBus(conn: ?*c.GDBusConnection, _: [*c]const u8, _: c.gpointer) callconv(.c)
         fatal("cannot export {s}", .{PATH});
 }
 
+var config_path: [:0]const u8 = "";
+
+fn loadMode() void {
+    var data: [*c]u8 = null;
+    if (c.g_file_get_contents(config_path.ptr, &data, null, null) == 0) return;
+    defer c.g_free(data);
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+    const m = policy.fromConfig(arena.allocator(), std.mem.span(data)) orelse return;
+    c.g_mutex_lock(&lock);
+    defer c.g_mutex_unlock(&lock);
+    mode = m;
+}
+
+fn onConfig(_: ?*c.GFileMonitor, _: ?*c.GFile, _: ?*c.GFile, event: c.GFileMonitorEvent, _: c.gpointer) callconv(.c) void {
+    if (event == c.G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT or event == c.G_FILE_MONITOR_EVENT_CREATED) loadMode();
+}
+
+fn watchConfig(a: std.mem.Allocator) void {
+    config_path = std.fmt.allocPrintSentinel(a, "{s}/sinty-agent/config.json", .{std.mem.span(c.g_get_user_config_dir())}, 0) catch return;
+    loadMode();
+    const file = c.g_file_new_for_path(config_path.ptr);
+    const monitor = c.g_file_monitor_file(file, c.G_FILE_MONITOR_NONE, null, null) orelse return;
+    _ = c.g_signal_connect_data(monitor, "changed", @ptrCast(&onConfig), null, null, 0);
+}
+
 fn onLost(_: ?*c.GDBusConnection, _: [*c]const u8, _: c.gpointer) callconv(.c) void {
     fatal("lost {s}", .{NAME});
 }
@@ -1087,6 +1113,7 @@ pub fn main() void {
     const t = std.Thread.spawn(.{}, acceptLoop, .{ listener, false }) catch fatal("cannot start the listener", .{});
     t.detach();
 
+    watchConfig(a);
     _ = c.g_bus_own_name_on_connection(bus, NAME, c.G_BUS_NAME_OWNER_FLAGS_NONE, onBus, onLost, null, null);
     c.g_main_loop_run(c.g_main_loop_new(null, 0));
 }
