@@ -453,7 +453,7 @@ pub fn claudeCode(a: std.mem.Allocator, cfg: Config, prompt: []const u8) Error![
     const m = try mcpCommand(a, !local);
     const conf = try json.Stringify.valueAlloc(a, .{ .mcpServers = .{ .sinty = .{ .command = m[0], .args = [_][]const u8{m[1]}, .env = .{ .SINTY_AGENT_TOKEN = grantedToken() } } } }, .{});
     var words: std.ArrayList([]const u8) = .empty;
-    try words.appendSlice(a, &.{ "claude", "-p", prompt, "--mcp-config", conf, "--allowedTools", "mcp__sinty", "--append-system-prompt", SYSTEM });
+    try words.appendSlice(a, &.{ "claude", "-p", prompt, "--mcp-config", conf, "--strict-mcp-config", "--tools", "", "--allowedTools", "mcp__sinty","--append-system-prompt", SYSTEM });
     if (cfg.model.len > 0) try words.appendSlice(a, &.{ "--model", cfg.model });
     return spawnCli(a, words.items, !local);
 }
