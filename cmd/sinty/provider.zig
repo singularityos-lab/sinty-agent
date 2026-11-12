@@ -209,10 +209,15 @@ fn startDaemon() void {
     if (r != null) c.g_variant_unref(r);
 }
 
+fn isLocal(url: []const u8) bool {
+    const rest = if (std.mem.indexOf(u8, url, "://")) |i| url[i + 3 ..] else url;
+    return std.mem.startsWith(u8, rest, "127.") or std.mem.startsWith(u8, rest, "localhost") or std.mem.startsWith(u8, rest, "[::1]");
+}
+
 fn post(a: std.mem.Allocator, url: []const u8, body: []const u8, headers: []const [2][]const u8) Error!json.Value {
     const session = c.soup_session_new();
     defer c.g_object_unref(session);
-    c.soup_session_set_timeout(session, 300);
+    c.soup_session_set_timeout(session, if (isLocal(url)) 1800 else 300);
     const u = try z(a, url);
     const msg = c.soup_message_new("POST", u.ptr) orelse return error.Http;
     defer c.g_object_unref(msg);
