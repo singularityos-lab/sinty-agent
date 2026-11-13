@@ -123,8 +123,10 @@ pub fn nextStep(p: Plan) ?usize {
 }
 
 pub fn expand(a: std.mem.Allocator, path: []const u8, home: []const u8) []const u8 {
-    if (path.len > 0 and path[0] == '~') return std.fmt.allocPrint(a, "{s}{s}", .{ home, path[1..] }) catch path;
-    return path;
+    if (path.len == 0 or path[0] != '~') return path;
+    const rest = std.mem.trimStart(u8, path[1..], "/");
+    if (rest.len == 0) return home;
+    return std.fmt.allocPrint(a, "{s}/{s}", .{ home, rest }) catch path;
 }
 
 pub fn inHome(a: std.mem.Allocator, path: []const u8, home: []const u8) []const u8 {
@@ -180,6 +182,9 @@ test "a folder name means a folder in the home" {
     try std.testing.expectEqualStrings("/home/u/Inbox", inHome(a, "Inbox", "/home/u"));
     try std.testing.expectEqualStrings("/home/u/Inbox", inHome(a, "home/Inbox", "/home/u"));
     try std.testing.expectEqualStrings("/home/u/Inbox", inHome(a, "~/Inbox", "/home/u"));
+    try std.testing.expectEqualStrings("/home/u/Inbox", inHome(a, "~Inbox", "/home/u"));
+    try std.testing.expectEqualStrings("/home/u", inHome(a, "~", "/home/u"));
+    try std.testing.expectEqualStrings("/home/u/Downloads", expand(a, "~/Downloads", "/home/u"));
     try std.testing.expectEqualStrings("/home/u", inHome(a, "home", "/home/u"));
     try std.testing.expectEqualStrings("/etc", inHome(a, "/etc", "/home/u"));
 }
