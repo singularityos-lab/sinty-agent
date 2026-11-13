@@ -127,6 +127,14 @@ pub fn expand(a: std.mem.Allocator, path: []const u8, home: []const u8) []const 
     return path;
 }
 
+pub fn inHome(a: std.mem.Allocator, path: []const u8, home: []const u8) []const u8 {
+    const full = expand(a, path, home);
+    if (full.len > 0 and full[0] == '/') return full;
+    const rest = if (std.mem.eql(u8, full, "home")) "" else if (std.mem.startsWith(u8, full, "home/")) full[5..] else full;
+    if (rest.len == 0) return home;
+    return std.fmt.allocPrint(a, "{s}/{s}", .{ home, rest }) catch full;
+}
+
 test "a task needs an id, a prompt and a valid trigger" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -163,6 +171,17 @@ test "due follows the trigger" {
     var off = login;
     off.enabled = false;
     try std.testing.expect(!due(off, 2000, 0, 0, 1000));
+}
+
+test "a folder name means a folder in the home" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("/home/u/Inbox", inHome(a, "Inbox", "/home/u"));
+    try std.testing.expectEqualStrings("/home/u/Inbox", inHome(a, "home/Inbox", "/home/u"));
+    try std.testing.expectEqualStrings("/home/u/Inbox", inHome(a, "~/Inbox", "/home/u"));
+    try std.testing.expectEqualStrings("/home/u", inHome(a, "home", "/home/u"));
+    try std.testing.expectEqualStrings("/etc", inHome(a, "/etc", "/home/u"));
 }
 
 test "a plan resumes at its first open step" {

@@ -1969,7 +1969,7 @@ fn filesSearch(a: std.mem.Allocator, args: std.json.Value) mcp.Outcome {
     const home = std.mem.span(c.g_get_home_dir());
     var roots: std.ArrayList([]const u8) = .empty;
     if (str(args, "folder")) |f| {
-        const full = tasks.expand(a, f, home);
+        const full = tasks.inHome(a, f, home);
         if (!std.mem.startsWith(u8, full, home) or std.mem.indexOf(u8, full, "..") != null) return fail("search only inside the home folder");
         roots.append(a, full) catch {};
     } else {
