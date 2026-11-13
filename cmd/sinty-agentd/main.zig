@@ -1767,11 +1767,7 @@ fn rewatch(a: std.mem.Allocator, list: []tasks.Task) void {
     }
 }
 
-fn tick(_: c.gpointer) callconv(.c) c.gboolean {
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const list = loadTasks(a);
+fn watchTasks(a: std.mem.Allocator, list: []tasks.Task) void {
     var stamp: i64 = 0;
     const info = c.g_file_new_for_path(tasks_path.ptr);
     defer c.g_object_unref(info);
@@ -1783,6 +1779,14 @@ fn tick(_: c.gpointer) callconv(.c) c.gboolean {
         monitored_stamp = stamp;
         rewatch(a, list);
     }
+}
+
+fn tick(_: c.gpointer) callconv(.c) c.gboolean {
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const list = loadTasks(a);
+    watchTasks(a, list);
     c.g_mutex_lock(&lock);
     const on = background and !stopped;
     c.g_mutex_unlock(&lock);
@@ -1811,6 +1815,9 @@ fn startBackground(a: std.mem.Allocator, sdir: []const u8) void {
     tasks_path = std.fmt.allocPrintSentinel(a, "{s}/sinty-agent/tasks.json", .{std.mem.span(c.g_get_user_config_dir())}, 0) catch return;
     task_state_path = std.fmt.allocPrintSentinel(a, "{s}/tasks-state.json", .{sdir}, 0) catch return;
     plans_path = std.fmt.allocPrintSentinel(a, "{s}/plans.json", .{sdir}, 0) catch return;
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+    watchTasks(arena.allocator(), loadTasks(arena.allocator()));
     const every: c.guint = if (c.g_getenv("SINTY_AGENT_TICK") != null) 2 else 60;
     _ = c.g_timeout_add_seconds(every, tick, null);
 }
